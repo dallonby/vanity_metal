@@ -241,9 +241,10 @@ struct VanityGenerator: ParsableCommand {
                         // Add iteration + 1 to get the actual key:
                         // - iter=1 checks (k+2)*G, key = k+2 = k + iter + 1
                         // - iter=N checks (k+N+1)*G, key = k+N+1 = k + iter + 1
+                        let baseKey = formatKeyAsHex(privateKey)
                         addToKey(&privateKey, UInt64(iteration + 1))
                         let hexKey = formatKeyAsHex(privateKey)
-                        print("\nFound #\(i + 1): Private Key = \(hexKey)")
+                        print("\nFound #\(i + 1): iter=\(iteration), baseKey=\(baseKey), finalKey=\(hexKey)")
                     }
                 }
 
