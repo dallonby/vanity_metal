@@ -14,7 +14,7 @@ using namespace metal;
 // =============================================================================
 
 #define MP_WORDS 8
-#define BATCH_SIZE 256  // Points to batch for single inverse
+#define BATCH_SIZE 32  // Smaller batch = less register pressure = better occupancy
 
 typedef uint mp_word;
 
@@ -493,11 +493,9 @@ kernel void profanity_iterate(
 }
 
 // =============================================================================
-// Batch inverse kernel - computes many inverses with just one inverse operation
-// Uses Montgomery's trick: to invert x1, x2, ..., xn:
-// 1. Compute products: p1=x1, p2=x1*x2, ..., pn=x1*x2*...*xn
-// 2. Invert pn to get (x1*x2*...*xn)^(-1)
-// 3. Multiply out: xn^(-1) = pn^(-1) * p(n-1), etc.
+// Batch inverse kernel - simple sequential version (like profanity2)
+// One thread per batch, processes BATCH_SIZE points sequentially
+// This is actually efficient because the work is compute-bound, not memory-bound
 // =============================================================================
 
 kernel void profanity_inverse_batch(
@@ -508,6 +506,8 @@ kernel void profanity_inverse_batch(
 ) {
     const uint baseId = tid * batchSize;
 
+    // Use smaller local arrays to reduce register pressure
+    // Process in chunks if batchSize is large
     mp_number products[BATCH_SIZE];
     mp_number originals[BATCH_SIZE];
 
