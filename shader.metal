@@ -307,38 +307,114 @@ inline void u256_mul_full(thread const U256& a, thread const U256& b,
 
 // Fast reduction modulo secp256k1 prime using its special form
 // p = 2^256 - 2^32 - 977
-// For a 512-bit number (lo, hi): result = lo + hi * (2^32 + 977) mod p
+// Since p = 2^256 - c where c = 2^32 + 977, we have 2^256 ≡ c (mod p)
+// For a 512-bit number, we iteratively reduce the high bits
 inline U256 reduce_512_mod_p(thread const U256& lo, thread const U256& hi) {
-    if (u256_is_zero(hi)) {
-        return mod_p(lo);
-    }
+    // Work with 320-bit intermediate to handle overflow properly
+    // We'll use 5 limbs during reduction
+    uint64_t r[5];
+    r[0] = lo.limbs[0];
+    r[1] = lo.limbs[1];
+    r[2] = lo.limbs[2];
+    r[3] = lo.limbs[3];
+    r[4] = 0;
 
-    // Multiply hi by (2^32 + 977) and add to lo
-    // This is simplified; full implementation would need more iterations
-    U256 result = lo;
-    U256 mult = hi;
-
-    // hi * 2^32
-    U256 shifted;
-    shifted.limbs[0] = 0;
-    shifted.limbs[1] = mult.limbs[0];
-    shifted.limbs[2] = mult.limbs[1];
-    shifted.limbs[3] = mult.limbs[2];
-    // Note: mult.limbs[3] << 32 would overflow, need special handling
-
-    result = u256_add(result, shifted);
-
-    // hi * 977
-    uint64_t carry = 0;
-    U256 mul977;
+    // Process each limb of hi, multiplying by c = 2^32 + 977
+    // hi[i] * 2^(256 + 64*i) ≡ hi[i] * c * 2^(64*i) (mod p)
     for (int i = 0; i < 4; i++) {
-        uint64_t prod = mult.limbs[i] * 977 + carry;
-        mul977.limbs[i] = prod;
-        carry = 0; // simplified, would need proper carry handling
-    }
-    result = u256_add(result, mul977);
+        uint64_t h = hi.limbs[i];
+        if (h == 0) continue;
 
-    // Reduce
+        // Multiply h by 977 and add at position i
+        // 977 fits in 10 bits, so h * 977 won't overflow if h < 2^54
+        // For safety, compute full 128-bit product
+        uint64_t prod_lo = h * 977;
+        uint64_t prod_hi = mulhi(h, uint64_t(977));  // Metal's mulhi intrinsic
+
+        // Add prod_lo at position i
+        uint64_t carry = 0;
+        uint64_t sum = r[i] + prod_lo;
+        carry = (sum < r[i]) ? 1 : 0;
+        r[i] = sum;
+
+        // Add prod_hi + carry at position i+1
+        sum = r[i + 1] + prod_hi + carry;
+        carry = (sum < r[i + 1]) || (prod_hi + carry < prod_hi) ? 1 : 0;
+        r[i + 1] = sum;
+
+        // Propagate carry
+        for (int j = i + 2; j < 5 && carry; j++) {
+            sum = r[j] + carry;
+            carry = (sum < r[j]) ? 1 : 0;
+            r[j] = sum;
+        }
+
+        // Multiply h by 2^32 and add at position i (this is h << 32 at limb i)
+        // Which means: low 32 bits go to upper half of r[i], high 32 bits go to r[i+1]
+        uint64_t h_lo = h << 32;
+        uint64_t h_hi = h >> 32;
+
+        carry = 0;
+        sum = r[i] + h_lo;
+        carry = (sum < r[i]) ? 1 : 0;
+        r[i] = sum;
+
+        sum = r[i + 1] + h_hi + carry;
+        carry = (sum < r[i + 1]) || (h_hi + carry < h_hi) ? 1 : 0;
+        r[i + 1] = sum;
+
+        // Propagate carry
+        for (int j = i + 2; j < 5 && carry; j++) {
+            sum = r[j] + carry;
+            carry = (sum < r[j]) ? 1 : 0;
+            r[j] = sum;
+        }
+    }
+
+    // Now reduce r[4] if non-zero (multiply by c and add to lower limbs)
+    while (r[4] != 0) {
+        uint64_t h = r[4];
+        r[4] = 0;
+
+        // h * 977
+        uint64_t prod_lo = h * 977;
+        uint64_t carry = 0;
+        uint64_t sum = r[0] + prod_lo;
+        carry = (sum < r[0]) ? 1 : 0;
+        r[0] = sum;
+
+        for (int j = 1; j < 5 && carry; j++) {
+            sum = r[j] + carry;
+            carry = (sum < r[j]) ? 1 : 0;
+            r[j] = sum;
+        }
+
+        // h * 2^32
+        uint64_t h_lo = h << 32;
+        uint64_t h_hi = h >> 32;
+
+        sum = r[0] + h_lo;
+        carry = (sum < r[0]) ? 1 : 0;
+        r[0] = sum;
+
+        sum = r[1] + h_hi + carry;
+        carry = (sum < r[1]) ? 1 : 0;
+        r[1] = sum;
+
+        for (int j = 2; j < 5 && carry; j++) {
+            sum = r[j] + carry;
+            carry = (sum < r[j]) ? 1 : 0;
+            r[j] = sum;
+        }
+    }
+
+    U256 result;
+    result.limbs[0] = r[0];
+    result.limbs[1] = r[1];
+    result.limbs[2] = r[2];
+    result.limbs[3] = r[3];
+
+    // Final reduction: subtract p if result >= p
     U256 p = u256_from_constant(SECP256K1_P);
     while (u256_gte_val(result, p)) {
         result = u256_sub_val(result, p);
