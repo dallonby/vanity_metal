@@ -15,11 +15,14 @@ struct VanityGenerator: ParsableCommand {
     @Option(name: .shortAndLong, help: "Address prefix to match (without 0x)")
     var prefix: String = "badbad"
 
-    @Option(name: .shortAndLong, help: "Iterations per dispatch")
-    var iterations: Int = 256
+    @Option(name: .shortAndLong, help: "Iterations per batch (more = less overhead)")
+    var iterations: Int = 255
 
     @Option(name: .shortAndLong, help: "Number of GPU threads")
     var threads: Int = 65536
+
+    @Option(name: .shortAndLong, help: "Inverse batch size (threads per inverse kernel call)")
+    var batchSize: Int = 255
 
     func run() throws {
         print("Vanity Address Generator (Metal/Apple Silicon) - Profanity-killer Edition")
@@ -49,12 +52,14 @@ struct VanityGenerator: ParsableCommand {
 
         // Get kernels
         guard let initKernel = library.makeFunction(name: "compute_initial_points"),
+              let inverseKernel = library.makeFunction(name: "profanity_inverse_batch"),
               let iterateKernel = library.makeFunction(name: "profanity_iterate") else {
             print("Error: Could not find kernel functions")
             throw ExitCode.failure
         }
 
         let initPipeline = try device.makeComputePipelineState(function: initKernel)
+        let inversePipeline = try device.makeComputePipelineState(function: inverseKernel)
         let iteratePipeline = try device.makeComputePipelineState(function: iterateKernel)
 
         guard let commandQueue = device.makeCommandQueue() else {
@@ -62,13 +67,14 @@ struct VanityGenerator: ParsableCommand {
             throw ExitCode.failure
         }
 
-        // Thread configuration
-        let totalThreads = threads
+        // Thread configuration - must be divisible by batchSize
+        let totalThreads = (threads / batchSize) * batchSize
+        let inverseThreads = totalThreads / batchSize
         let maxThreadsPerGroup = iteratePipeline.maxTotalThreadsPerThreadgroup
         let threadGroupSize = MTLSize(width: min(256, maxThreadsPerGroup), height: 1, depth: 1)
 
-        print("Using \(totalThreads) GPU threads")
-        print("Architecture: Lambda chaining with delta storage (profanity2-style)")
+        print("Using \(totalThreads) GPU threads, batch size \(batchSize)")
+        print("Architecture: Batch inversion + lambda chaining (profanity2-style)")
         print("")
 
         // Allocate buffers (32-bit limbs, 8 words per number)
@@ -90,6 +96,12 @@ struct VanityGenerator: ParsableCommand {
         // Previous lambda: 8 x uint32 per thread
         guard let prevLambdaBuffer = device.makeBuffer(length: totalThreads * bytesPerNumber, options: .storageModeShared) else {
             print("Error: Could not allocate prevLambda buffer")
+            throw ExitCode.failure
+        }
+
+        // Inverses buffer: 8 x uint32 per thread
+        guard let inversesBuffer = device.makeBuffer(length: totalThreads * bytesPerNumber, options: .storageModeShared) else {
+            print("Error: Could not allocate inverses buffer")
             throw ExitCode.failure
         }
 
@@ -117,6 +129,7 @@ struct VanityGenerator: ParsableCommand {
 
         var prefixLenVal = prefixLen
         var maxResultsVal = UInt32(maxResults)
+        var batchSizeVal = UInt32(batchSize)
 
         let startTime = Date()
         var totalKeysChecked: UInt64 = 0
@@ -167,19 +180,38 @@ struct VanityGenerator: ParsableCommand {
                 commandBuffer.waitUntilCompleted()
             }
 
-            // Step 3: Run iterations
+            // Step 3: Run iterations with batch inversion
             for iter in 0..<iterations {
+                // Step 3a: Batch inverse kernel (1 inverse per batchSize points)
+                if let commandBuffer = commandQueue.makeCommandBuffer(),
+                   let encoder = commandBuffer.makeComputeCommandEncoder() {
+
+                    encoder.setComputePipelineState(inversePipeline)
+                    encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
+                    encoder.setBuffer(inversesBuffer, offset: 0, index: 1)
+                    encoder.setBytes(&batchSizeVal, length: MemoryLayout<UInt32>.size, index: 2)
+
+                    let gridSize = MTLSize(width: inverseThreads, height: 1, depth: 1)
+                    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
+                    encoder.endEncoding()
+
+                    commandBuffer.commit()
+                    commandBuffer.waitUntilCompleted()
+                }
+
+                // Step 3b: Iterate kernel (uses pre-computed inverses, NO inverse call)
                 if let commandBuffer = commandQueue.makeCommandBuffer(),
                    let encoder = commandBuffer.makeComputeCommandEncoder() {
 
                     encoder.setComputePipelineState(iteratePipeline)
                     encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
                     encoder.setBuffer(prevLambdaBuffer, offset: 0, index: 1)
-                    encoder.setBuffer(resultsBuffer, offset: 0, index: 2)
-                    encoder.setBuffer(foundCountBuffer, offset: 0, index: 3)
-                    encoder.setBuffer(prefixBuffer, offset: 0, index: 4)
-                    encoder.setBytes(&prefixLenVal, length: MemoryLayout<UInt32>.size, index: 5)
-                    encoder.setBytes(&maxResultsVal, length: MemoryLayout<UInt32>.size, index: 6)
+                    encoder.setBuffer(inversesBuffer, offset: 0, index: 2)
+                    encoder.setBuffer(resultsBuffer, offset: 0, index: 3)
+                    encoder.setBuffer(foundCountBuffer, offset: 0, index: 4)
+                    encoder.setBuffer(prefixBuffer, offset: 0, index: 5)
+                    encoder.setBytes(&prefixLenVal, length: MemoryLayout<UInt32>.size, index: 6)
+                    encoder.setBytes(&maxResultsVal, length: MemoryLayout<UInt32>.size, index: 7)
 
                     let gridSize = MTLSize(width: totalThreads, height: 1, depth: 1)
                     encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
@@ -203,9 +235,7 @@ struct VanityGenerator: ParsableCommand {
                         if threadId < storedPrivateKeys.count {
                             var privateKey = storedPrivateKeys[threadId]
 
-                            // Add (iter + 1) to the key (since we already advanced by 1 in init)
-                            // The kernel checks AFTER incrementing, so the key that matched was at iteration 'iter'
-                            // Actually the init already moved to next point, so offset is iter + 1
+                            // Add (iter + 1) to the key
                             addToKey(&privateKey, UInt64(iter + 1))
 
                             // Format as big-endian hex

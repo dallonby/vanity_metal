@@ -386,27 +386,20 @@ inline void mp_mod_inverse(thread mp_number* r) {
 kernel void profanity_iterate(
     device mp_number* deltaX [[buffer(0)]],         // x - Gx for each point
     device mp_number* prevLambda [[buffer(1)]],     // Previous lambda values
-    device uint* results [[buffer(2)]],             // Result addresses (5 x uint per match)
-    device atomic_uint* foundCount [[buffer(3)]],   // Number found
-    constant uchar* prefix [[buffer(4)]],           // Target prefix bytes
-    constant uint& prefixLen [[buffer(5)]],         // Prefix length in nibbles
-    constant uint& maxResults [[buffer(6)]],        // Max results
-    uint tid [[thread_position_in_grid]],
-    uint groupSize [[threads_per_threadgroup]],
-    uint groupId [[threadgroup_position_in_grid]]
+    device const mp_number* inverses [[buffer(2)]], // Pre-computed (-2Gy / dX) values
+    device uint* results [[buffer(3)]],             // Result addresses
+    device atomic_uint* foundCount [[buffer(4)]],   // Number found
+    constant uchar* prefix [[buffer(5)]],           // Target prefix bytes
+    constant uint& prefixLen [[buffer(6)]],         // Prefix length in nibbles
+    constant uint& maxResults [[buffer(7)]],        // Max results
+    uint tid [[thread_position_in_grid]]
 ) {
     // Load state
     mp_number dX = deltaX[tid];
     mp_number lambda = prevLambda[tid];
 
-    // Compute inverse of dX with -2Gy folded in
-    // inv = -2Gy / dX
-    mp_number inv = dX;
-    mp_mod_inverse(&inv);
-
-    mp_number neg2gy;
-    for (int i = 0; i < MP_WORDS; i++) neg2gy.d[i] = NEG_2GY.d[i];
-    mp_mod_mul(&inv, &inv, &neg2gy);
+    // Load pre-computed inverse (already has -2Gy folded in)
+    mp_number inv = inverses[tid];
 
     // λ' = inv - λ = (-2Gy/dX) - λ
     mp_mod_sub(&lambda, &inv, &lambda);
