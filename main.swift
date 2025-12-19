@@ -165,6 +165,15 @@ struct VanityGenerator: ParsableCommand {
                 throw ExitCode.failure
             }
 
+            // DEBUG: Set first thread's key to a known value for testing
+            if batchCount == 1 {
+                let testKeyPtr = keysPtr.bindMemory(to: UInt32.self, capacity: wordsPerNumber)
+                // Set key to 1 (little-endian: d[0]=1, rest=0)
+                testKeyPtr[0] = 1
+                for i in 1..<wordsPerNumber { testKeyPtr[i] = 0 }
+                print("DEBUG: Thread 0 key set to 1 for testing")
+            }
+
             // Store private keys for later recovery
             let keysTypedPtr = keysPtr.bindMemory(to: UInt32.self, capacity: totalThreads * wordsPerNumber)
             storedPrivateKeys = []
@@ -194,6 +203,22 @@ struct VanityGenerator: ParsableCommand {
 
                 commandBuffer.commit()
                 commandBuffer.waitUntilCompleted()
+            }
+
+            // DEBUG: After init, dump thread 0's deltaX to verify scalar mult
+            if batchCount == 1 {
+                let deltaPtr = deltaXBuffer.contents().bindMemory(to: UInt32.self, capacity: wordsPerNumber)
+                var deltaHex = "0x"
+                for j in stride(from: 7, through: 0, by: -1) {
+                    deltaHex += String(format: "%08x", deltaPtr[j])
+                }
+                print("DEBUG: Thread 0 deltaX after init: \(deltaHex)")
+                print("DEBUG: This should be (2*G).x - G.x for key=1")
+                // For key=1: k*G = G, then init adds G to get 2*G
+                // deltaX = 2G.x - G.x
+                // 2*G.x = 0xc6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5
+                // G.x   = 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+                // Expected delta = 2G.x - G.x
             }
 
             // Step 3: Run iterations with batch inversion
