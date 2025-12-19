@@ -52,22 +52,25 @@ struct VanityGenerator: ParsableCommand {
 
         // Get kernels
         guard let initKernel = library.makeFunction(name: "compute_initial_points"),
-              let combinedKernel = library.makeFunction(name: "profanity_combined") else {
+              let inverseKernel = library.makeFunction(name: "profanity_inverse_batch"),
+              let iterateKernel = library.makeFunction(name: "profanity_iterate") else {
             print("Error: Could not find kernel functions")
             throw ExitCode.failure
         }
 
         let initPipeline = try device.makeComputePipelineState(function: initKernel)
-        let combinedPipeline = try device.makeComputePipelineState(function: combinedKernel)
+        let inversePipeline = try device.makeComputePipelineState(function: inverseKernel)
+        let iteratePipeline = try device.makeComputePipelineState(function: iterateKernel)
 
         guard let commandQueue = device.makeCommandQueue() else {
             print("Error: Could not create command queue")
             throw ExitCode.failure
         }
 
-        // Thread configuration
-        let totalThreads = threads
-        let maxThreadsPerGroup = combinedPipeline.maxTotalThreadsPerThreadgroup
+        // Thread configuration - must be divisible by batchSize
+        let totalThreads = (threads / batchSize) * batchSize
+        let inverseThreads = totalThreads / batchSize
+        let maxThreadsPerGroup = iteratePipeline.maxTotalThreadsPerThreadgroup
         let threadGroupSize = MTLSize(width: min(256, maxThreadsPerGroup), height: 1, depth: 1)
 
         print("Using \(totalThreads) GPU threads, batch size \(batchSize)")
@@ -186,26 +189,34 @@ struct VanityGenerator: ParsableCommand {
                 commandBuffer.waitUntilCompleted()
             }
 
-            // Step 3: Run iterations with combined kernel (inverse + iterate in one)
-            // Single dispatch per iteration, no barriers needed
+            // Step 3: Run iterations with batch inversion
+            // Use single encoder, alternate between inverse and iterate kernels
             if let commandBuffer = commandQueue.makeCommandBuffer(),
                let encoder = commandBuffer.makeComputeCommandEncoder() {
 
-                let gridSize = MTLSize(width: totalThreads, height: 1, depth: 1)
-
-                // Set constant buffers once
-                encoder.setComputePipelineState(combinedPipeline)
-                encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
-                encoder.setBuffer(prevLambdaBuffer, offset: 0, index: 1)
-                encoder.setBuffer(resultsBuffer, offset: 0, index: 2)
-                encoder.setBuffer(foundCountBuffer, offset: 0, index: 3)
-                encoder.setBuffer(prefixBuffer, offset: 0, index: 4)
-                encoder.setBytes(&prefixLenVal, length: MemoryLayout<UInt32>.size, index: 5)
-                encoder.setBytes(&maxResultsVal, length: MemoryLayout<UInt32>.size, index: 6)
-                encoder.setBuffer(iterCounterBuffer, offset: 0, index: 7)
+                let inverseGridSize = MTLSize(width: inverseThreads, height: 1, depth: 1)
+                let iterateGridSize = MTLSize(width: totalThreads, height: 1, depth: 1)
 
                 for _ in 0..<iterations {
-                    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
+                    // Inverse kernel
+                    encoder.setComputePipelineState(inversePipeline)
+                    encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
+                    encoder.setBuffer(inversesBuffer, offset: 0, index: 1)
+                    encoder.setBytes(&batchSizeVal, length: MemoryLayout<UInt32>.size, index: 2)
+                    encoder.dispatchThreads(inverseGridSize, threadsPerThreadgroup: threadGroupSize)
+
+                    // Iterate kernel
+                    encoder.setComputePipelineState(iteratePipeline)
+                    encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
+                    encoder.setBuffer(prevLambdaBuffer, offset: 0, index: 1)
+                    encoder.setBuffer(inversesBuffer, offset: 0, index: 2)
+                    encoder.setBuffer(resultsBuffer, offset: 0, index: 3)
+                    encoder.setBuffer(foundCountBuffer, offset: 0, index: 4)
+                    encoder.setBuffer(prefixBuffer, offset: 0, index: 5)
+                    encoder.setBytes(&prefixLenVal, length: MemoryLayout<UInt32>.size, index: 6)
+                    encoder.setBytes(&maxResultsVal, length: MemoryLayout<UInt32>.size, index: 7)
+                    encoder.setBuffer(iterCounterBuffer, offset: 0, index: 8)
+                    encoder.dispatchThreads(iterateGridSize, threadsPerThreadgroup: threadGroupSize)
                 }
 
                 encoder.endEncoding()
