@@ -14,7 +14,7 @@ using namespace metal;
 // =============================================================================
 
 #define MP_WORDS 8
-#define BATCH_SIZE 64  // Larger batch = fewer inverse threads = more compute per inverse
+#define BATCH_SIZE 32  // Optimal for Metal - less register pressure
 
 typedef uint mp_word;
 
@@ -446,16 +446,12 @@ kernel void profanity_iterate(
     mp_mod_mul(&y, &lambda, &dX);
     mp_mod_sub_const(&y, &NEG_GY, &y);
 
-    // Recover x = dX - (-Gx) = dX + Gx
+    // Recover x from delta: dX = x - Gx, so x = dX + Gx
+    // We have -Gx stored as NEG_GX, so x = dX - (-Gx) = dX - NEG_GX
     mp_number x;
-    mp_mod_sub_const(&x, &NEG_GX, &dX);  // x = (-Gx) - dX... wait, need to negate
-    // Actually: x = dX - (-Gx), so we compute dX - negGx
-    mp_mod_sub(&x, &dX, &x);  // Hmm, this is wrong. Let me fix:
-    // dX = x - Gx, so x = dX + Gx
-    // We have -Gx stored. So x = dX - (-Gx)
     mp_number negGx;
     for (int i = 0; i < MP_WORDS; i++) negGx.d[i] = NEG_GX.d[i];
-    mp_mod_sub(&x, &dX, &negGx);
+    mp_mod_sub(&x, &dX, &negGx);  // x = dX - NEG_GX = dX + Gx
 
     // Compute keccak256(x || y)
     uint64_t state[25] = {0};
