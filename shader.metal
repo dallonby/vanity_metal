@@ -483,7 +483,8 @@ kernel void profanity_iterate(
     keccak_f1600(state);
 
     // Extract address (last 20 bytes of 32-byte hash)
-    // Hash is in state[0..3], address is bytes 12-31
+    // Keccak state is little-endian: byte 0 is LSB of state[0], byte 7 is MSB of state[0]
+    // Address is bytes 12-31 of the 32-byte hash
     uchar hash[32];
     for (int i = 0; i < 4; i++) {
         for (int j = 0; j < 8; j++) {
