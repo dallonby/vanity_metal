@@ -590,34 +590,81 @@ inline void jacobian_to_affine(thread const JacobianPoint& p, thread U256& x, th
 }
 
 // =============================================================================
-// Main kernel
+// Optimized point addition for affine + affine -> affine
+// Used when adding G to current point (both in affine coords)
+// This avoids expensive Jacobian conversions
 // =============================================================================
 
+// Add two affine points, result in affine
+// Requires one modular inversion per addition
+inline void affine_add_g(thread U256& px, thread U256& py) {
+    // Adding G (generator) to P
+    // slope = (Gy - Py) / (Gx - Px)
+    // Rx = slope^2 - Px - Gx
+    // Ry = slope * (Px - Rx) - Py
+
+    U256 gx = u256_from_constant(SECP256K1_GX);
+    U256 gy = u256_from_constant(SECP256K1_GY);
+
+    // dx = Gx - Px
+    U256 dx = mod_sub(gx, px);
+    // dy = Gy - Py
+    U256 dy = mod_sub(gy, py);
+
+    // slope = dy / dx = dy * dx^(-1)
+    U256 dx_inv = mod_inv(dx);
+    U256 slope = mod_mul(dy, dx_inv);
+
+    // Rx = slope^2 - Px - Gx
+    U256 slope2 = mod_sqr(slope);
+    U256 rx = mod_sub(mod_sub(slope2, px), gx);
+
+    // Ry = slope * (Px - Rx) - Py
+    U256 ry = mod_sub(mod_mul(slope, mod_sub(px, rx)), py);
+
+    px = rx;
+    py = ry;
+}
+
+// =============================================================================
+// Main kernel - OPTIMIZED VERSION
+// =============================================================================
+// Key insight: Instead of computing k*G from scratch for each key (256 EC ops),
+// we receive precomputed starting points from CPU and just add G repeatedly.
+// This reduces from O(256) to O(1) EC operations per key!
+
 kernel void vanity_search(
-    device const uint64_t* seeds [[buffer(0)]],      // Random seeds per thread
-    device uint64_t* results [[buffer(1)]],          // Found private keys
-    device uint* found_count [[buffer(2)]],          // Atomic counter
-    device const uchar* prefix [[buffer(3)]],        // Target prefix bytes
-    constant uint& prefix_len [[buffer(4)]],         // Prefix length in nibbles
-    constant uint& max_results [[buffer(5)]],        // Max results to find
-    constant uint& iterations [[buffer(6)]],         // Iterations per thread
+    device const uint64_t* start_points [[buffer(0)]],  // Precomputed (x,y) affine coords per thread
+    device const uint64_t* start_keys [[buffer(1)]],    // Starting private keys per thread
+    device uint64_t* results [[buffer(2)]],             // Found private keys
+    device uint* found_count [[buffer(3)]],             // Atomic counter
+    device const uchar* prefix [[buffer(4)]],           // Target prefix bytes
+    constant uint& prefix_len [[buffer(5)]],            // Prefix length in nibbles
+    constant uint& max_results [[buffer(6)]],           // Max results to find
+    constant uint& iterations [[buffer(7)]],            // Iterations per thread
     uint tid [[thread_position_in_grid]]
 ) {
-    // Initialize private key from seed
+    // Load precomputed starting point (affine coordinates)
+    U256 pub_x, pub_y;
+    pub_x.limbs[0] = start_points[tid * 8 + 0];
+    pub_x.limbs[1] = start_points[tid * 8 + 1];
+    pub_x.limbs[2] = start_points[tid * 8 + 2];
+    pub_x.limbs[3] = start_points[tid * 8 + 3];
+    pub_y.limbs[0] = start_points[tid * 8 + 4];
+    pub_y.limbs[1] = start_points[tid * 8 + 5];
+    pub_y.limbs[2] = start_points[tid * 8 + 6];
+    pub_y.limbs[3] = start_points[tid * 8 + 7];
+
+    // Load starting private key
     U256 priv_key;
-    priv_key.limbs[0] = seeds[tid * 4 + 0];
-    priv_key.limbs[1] = seeds[tid * 4 + 1];
-    priv_key.limbs[2] = seeds[tid * 4 + 2];
-    priv_key.limbs[3] = seeds[tid * 4 + 3];
+    priv_key.limbs[0] = start_keys[tid * 4 + 0];
+    priv_key.limbs[1] = start_keys[tid * 4 + 1];
+    priv_key.limbs[2] = start_keys[tid * 4 + 2];
+    priv_key.limbs[3] = start_keys[tid * 4 + 3];
 
     for (uint iter = 0; iter < iterations; iter++) {
         // Check if we've found enough
         if (*found_count >= max_results) return;
-
-        // Compute public key
-        JacobianPoint pub_jac = scalar_mult_g(priv_key);
-        U256 pub_x, pub_y;
-        jacobian_to_affine(pub_jac, pub_x, pub_y);
 
         // Serialize public key (uncompressed, without 0x04 prefix for keccak)
         uchar pubkey[64];
@@ -671,7 +718,11 @@ kernel void vanity_search(
             }
         }
 
-        // Increment private key for next iteration
+        // Increment: P = P + G (single point addition!)
+        // This is the key optimization - O(1) instead of O(256)
+        affine_add_g(pub_x, pub_y);
+
+        // Increment private key
         priv_key.limbs[0] += 1;
         if (priv_key.limbs[0] == 0) {
             priv_key.limbs[1] += 1;
@@ -683,4 +734,33 @@ kernel void vanity_search(
             }
         }
     }
+}
+
+// =============================================================================
+// Legacy kernel for initial scalar multiplication (used by CPU to precompute)
+// =============================================================================
+
+kernel void compute_public_key(
+    device const uint64_t* private_keys [[buffer(0)]],  // Input private keys
+    device uint64_t* public_points [[buffer(1)]],       // Output (x,y) affine coords
+    uint tid [[thread_position_in_grid]]
+) {
+    U256 priv_key;
+    priv_key.limbs[0] = private_keys[tid * 4 + 0];
+    priv_key.limbs[1] = private_keys[tid * 4 + 1];
+    priv_key.limbs[2] = private_keys[tid * 4 + 2];
+    priv_key.limbs[3] = private_keys[tid * 4 + 3];
+
+    JacobianPoint pub_jac = scalar_mult_g(priv_key);
+    U256 pub_x, pub_y;
+    jacobian_to_affine(pub_jac, pub_x, pub_y);
+
+    public_points[tid * 8 + 0] = pub_x.limbs[0];
+    public_points[tid * 8 + 1] = pub_x.limbs[1];
+    public_points[tid * 8 + 2] = pub_x.limbs[2];
+    public_points[tid * 8 + 3] = pub_x.limbs[3];
+    public_points[tid * 8 + 4] = pub_y.limbs[0];
+    public_points[tid * 8 + 5] = pub_y.limbs[1];
+    public_points[tid * 8 + 6] = pub_y.limbs[2];
+    public_points[tid * 8 + 7] = pub_y.limbs[3];
 }
