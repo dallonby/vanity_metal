@@ -597,18 +597,22 @@ inline void jpoint_double(thread JPoint* r, thread const JPoint* p) {
     // For a + a: result = a - (p - a) = 2a - p, then add p if negative
     // This is getting complicated. Let me just implement mod_add:
 
-    // Inline mod_add
+    // Inline mod_add - handles carry correctly
     auto mod_add = [](thread mp_number* result, thread const mp_number* a, thread const mp_number* b) {
         mp_word c = 0;
         for (int i = 0; i < MP_WORDS; i++) {
             result->d[i] = a->d[i] + b->d[i] + c;
             c = result->d[i] < a->d[i] ? 1 : (result->d[i] == a->d[i] ? c : 0);
         }
-        // Reduce if >= mod
-        bool gte = true;
-        for (int i = MP_WORDS - 1; i >= 0; i--) {
-            if (result->d[i] > mod.d[i]) break;
-            if (result->d[i] < mod.d[i]) { gte = false; break; }
+        // If carry is set, result is definitely >= mod (since mod < 2^256)
+        // Otherwise check if result >= mod
+        bool gte = (c == 1);
+        if (!gte) {
+            gte = true;
+            for (int i = MP_WORDS - 1; i >= 0; i--) {
+                if (result->d[i] > mod.d[i]) break;
+                if (result->d[i] < mod.d[i]) { gte = false; break; }
+            }
         }
         if (gte) {
             c = 0;
@@ -662,16 +666,22 @@ inline void jpoint_add(thread JPoint* r, thread const JPoint* p, thread const JP
     if (p_zero) { *r = *q; return; }
     if (q_zero) { *r = *p; return; }
 
+    // Inline mod_add - handles carry correctly
     auto mod_add = [](thread mp_number* result, thread const mp_number* a, thread const mp_number* b) {
         mp_word c = 0;
         for (int i = 0; i < MP_WORDS; i++) {
             result->d[i] = a->d[i] + b->d[i] + c;
             c = result->d[i] < a->d[i] ? 1 : (result->d[i] == a->d[i] ? c : 0);
         }
-        bool gte = true;
-        for (int i = MP_WORDS - 1; i >= 0; i--) {
-            if (result->d[i] > mod.d[i]) break;
-            if (result->d[i] < mod.d[i]) { gte = false; break; }
+        // If carry is set, result is definitely >= mod (since mod < 2^256)
+        // Otherwise check if result >= mod
+        bool gte = (c == 1);
+        if (!gte) {
+            gte = true;
+            for (int i = MP_WORDS - 1; i >= 0; i--) {
+                if (result->d[i] > mod.d[i]) break;
+                if (result->d[i] < mod.d[i]) { gte = false; break; }
+            }
         }
         if (gte) {
             c = 0;
