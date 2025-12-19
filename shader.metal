@@ -387,13 +387,17 @@ kernel void profanity_iterate(
     device mp_number* deltaX [[buffer(0)]],         // x - Gx for each point
     device mp_number* prevLambda [[buffer(1)]],     // Previous lambda values
     device const mp_number* inverses [[buffer(2)]], // Pre-computed (-2Gy / dX) values
-    device uint* results [[buffer(3)]],             // Result addresses
+    device uint* results [[buffer(3)]],             // Result: [threadId, iteration] pairs
     device atomic_uint* foundCount [[buffer(4)]],   // Number found
     constant uchar* prefix [[buffer(5)]],           // Target prefix bytes
     constant uint& prefixLen [[buffer(6)]],         // Prefix length in nibbles
     constant uint& maxResults [[buffer(7)]],        // Max results
+    device uint* iterCounter [[buffer(8)]],         // Per-thread iteration counter
     uint tid [[thread_position_in_grid]]
 ) {
+    // Increment iteration counter
+    uint iter = iterCounter[tid];
+    iterCounter[tid] = iter + 1;
     // Load state
     mp_number dX = deltaX[tid];
     mp_number lambda = prevLambda[tid];
@@ -481,8 +485,9 @@ kernel void profanity_iterate(
     if (match) {
         uint idx = atomic_fetch_add_explicit(foundCount, 1, memory_order_relaxed);
         if (idx < maxResults) {
-            // Store the thread ID as result (caller will compute private key)
-            results[idx] = tid;
+            // Store both thread ID and iteration as result pair
+            results[idx * 2] = tid;
+            results[idx * 2 + 1] = iter;
         }
     }
 }

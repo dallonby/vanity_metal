@@ -105,9 +105,9 @@ struct VanityGenerator: ParsableCommand {
             throw ExitCode.failure
         }
 
-        // Results buffer (thread IDs of matches)
+        // Results buffer (thread ID + iteration pairs)
         let maxResults = count * 10  // Allow for some buffer
-        guard let resultsBuffer = device.makeBuffer(length: maxResults * MemoryLayout<UInt32>.size, options: .storageModeShared) else {
+        guard let resultsBuffer = device.makeBuffer(length: maxResults * 2 * MemoryLayout<UInt32>.size, options: .storageModeShared) else {
             print("Error: Could not allocate results buffer")
             throw ExitCode.failure
         }
@@ -118,6 +118,12 @@ struct VanityGenerator: ParsableCommand {
             throw ExitCode.failure
         }
         foundCountBuffer.contents().bindMemory(to: UInt32.self, capacity: 1).pointee = 0
+
+        // Iteration counter buffer (one per thread)
+        guard let iterCounterBuffer = device.makeBuffer(length: totalThreads * MemoryLayout<UInt32>.size, options: .storageModeShared) else {
+            print("Error: Could not allocate iteration counter buffer")
+            throw ExitCode.failure
+        }
 
         // Prefix buffer
         let prefixBytes = hexStringToBytes(prefix)
@@ -163,6 +169,9 @@ struct VanityGenerator: ParsableCommand {
                 storedPrivateKeys.append(key)
             }
 
+            // Reset iteration counters
+            memset(iterCounterBuffer.contents(), 0, totalThreads * MemoryLayout<UInt32>.size)
+
             // Step 2: Compute initial points (slow, once per batch)
             if let commandBuffer = commandQueue.makeCommandBuffer(),
                let encoder = commandBuffer.makeComputeCommandEncoder() {
@@ -181,74 +190,68 @@ struct VanityGenerator: ParsableCommand {
             }
 
             // Step 3: Run iterations with batch inversion
-            for iter in 0..<iterations {
-                // Step 3a: Batch inverse kernel (1 inverse per batchSize points)
-                if let commandBuffer = commandQueue.makeCommandBuffer(),
-                   let encoder = commandBuffer.makeComputeCommandEncoder() {
+            // Key optimization: encode ALL iterations into a SINGLE command buffer
+            // This eliminates CPU-GPU round trips between iterations
+            if let commandBuffer = commandQueue.makeCommandBuffer() {
 
-                    encoder.setComputePipelineState(inversePipeline)
-                    encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
-                    encoder.setBuffer(inversesBuffer, offset: 0, index: 1)
-                    encoder.setBytes(&batchSizeVal, length: MemoryLayout<UInt32>.size, index: 2)
+                for _ in 0..<iterations {
+                    // Inverse kernel
+                    if let encoder = commandBuffer.makeComputeCommandEncoder() {
+                        encoder.setComputePipelineState(inversePipeline)
+                        encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
+                        encoder.setBuffer(inversesBuffer, offset: 0, index: 1)
+                        encoder.setBytes(&batchSizeVal, length: MemoryLayout<UInt32>.size, index: 2)
 
-                    let gridSize = MTLSize(width: inverseThreads, height: 1, depth: 1)
-                    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
-                    encoder.endEncoding()
-
-                    commandBuffer.commit()
-                    commandBuffer.waitUntilCompleted()
-                }
-
-                // Step 3b: Iterate kernel (uses pre-computed inverses, NO inverse call)
-                if let commandBuffer = commandQueue.makeCommandBuffer(),
-                   let encoder = commandBuffer.makeComputeCommandEncoder() {
-
-                    encoder.setComputePipelineState(iteratePipeline)
-                    encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
-                    encoder.setBuffer(prevLambdaBuffer, offset: 0, index: 1)
-                    encoder.setBuffer(inversesBuffer, offset: 0, index: 2)
-                    encoder.setBuffer(resultsBuffer, offset: 0, index: 3)
-                    encoder.setBuffer(foundCountBuffer, offset: 0, index: 4)
-                    encoder.setBuffer(prefixBuffer, offset: 0, index: 5)
-                    encoder.setBytes(&prefixLenVal, length: MemoryLayout<UInt32>.size, index: 6)
-                    encoder.setBytes(&maxResultsVal, length: MemoryLayout<UInt32>.size, index: 7)
-
-                    let gridSize = MTLSize(width: totalThreads, height: 1, depth: 1)
-                    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
-                    encoder.endEncoding()
-
-                    commandBuffer.commit()
-                    commandBuffer.waitUntilCompleted()
-                }
-
-                totalKeysChecked += UInt64(totalThreads)
-                let newFoundCount = Int(foundCountBuffer.contents().bindMemory(to: UInt32.self, capacity: 1).pointee)
-
-                // Check for new results
-                if newFoundCount > foundResults {
-                    let resultsPtr = resultsBuffer.contents().bindMemory(to: UInt32.self, capacity: maxResults)
-
-                    for i in foundResults..<min(newFoundCount, count) {
-                        let threadId = Int(resultsPtr[i])
-
-                        // Recover private key: original key + iteration offset
-                        if threadId < storedPrivateKeys.count {
-                            var privateKey = storedPrivateKeys[threadId]
-
-                            // Add (iter + 1) to the key
-                            addToKey(&privateKey, UInt64(iter + 1))
-
-                            // Format as big-endian hex
-                            let hexKey = formatKeyAsHex(privateKey)
-                            print("\nFound #\(i + 1): Private Key = \(hexKey)")
-                        }
+                        let gridSize = MTLSize(width: inverseThreads, height: 1, depth: 1)
+                        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
+                        encoder.endEncoding()
                     }
 
-                    foundResults = min(newFoundCount, count)
-                    if foundResults >= count {
-                        break
+                    // Iterate kernel (uses pre-computed inverses)
+                    if let encoder = commandBuffer.makeComputeCommandEncoder() {
+                        encoder.setComputePipelineState(iteratePipeline)
+                        encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
+                        encoder.setBuffer(prevLambdaBuffer, offset: 0, index: 1)
+                        encoder.setBuffer(inversesBuffer, offset: 0, index: 2)
+                        encoder.setBuffer(resultsBuffer, offset: 0, index: 3)
+                        encoder.setBuffer(foundCountBuffer, offset: 0, index: 4)
+                        encoder.setBuffer(prefixBuffer, offset: 0, index: 5)
+                        encoder.setBytes(&prefixLenVal, length: MemoryLayout<UInt32>.size, index: 6)
+                        encoder.setBytes(&maxResultsVal, length: MemoryLayout<UInt32>.size, index: 7)
+                        encoder.setBuffer(iterCounterBuffer, offset: 0, index: 8)
+
+                        let gridSize = MTLSize(width: totalThreads, height: 1, depth: 1)
+                        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
+                        encoder.endEncoding()
                     }
                 }
+
+                commandBuffer.commit()
+                commandBuffer.waitUntilCompleted()
+            }
+
+            totalKeysChecked += UInt64(totalThreads) * UInt64(iterations)
+            let newFoundCount = Int(foundCountBuffer.contents().bindMemory(to: UInt32.self, capacity: 1).pointee)
+
+            // Check for new results
+            if newFoundCount > foundResults {
+                let resultsPtr = resultsBuffer.contents().bindMemory(to: UInt32.self, capacity: maxResults * 2)
+
+                for i in foundResults..<min(newFoundCount, count) {
+                    let threadId = Int(resultsPtr[i * 2])
+                    let iteration = Int(resultsPtr[i * 2 + 1])
+
+                    // Recover private key: original key + iteration offset
+                    if threadId < storedPrivateKeys.count {
+                        var privateKey = storedPrivateKeys[threadId]
+                        // Add iteration + 1 to get the actual key (iteration 0 = first point after init)
+                        addToKey(&privateKey, UInt64(iteration + 1))
+                        let hexKey = formatKeyAsHex(privateKey)
+                        print("\nFound #\(i + 1): Private Key = \(hexKey)")
+                    }
+                }
+
+                foundResults = min(newFoundCount, count)
             }
 
             // Print progress
