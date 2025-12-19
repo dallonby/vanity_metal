@@ -233,8 +233,11 @@ inline void mp_mod_mul(thread mp_number* r, thread const mp_number* X, thread co
             Z.d[j] += tM + cA;
             cA = Z.d[j] < tM ? 1 : (Z.d[j] == tM ? cA : 0);
         }
-        extraWord += cM + cA;
-        bool overflow = extraWord < cM;
+        // Add carries to extraWord, handling potential overflow
+        mp_word sumCarries = cM + cA;
+        bool carriesOverflow = sumCarries < cM;  // cM + cA overflowed
+        extraWord += sumCarries;
+        bool overflow = (extraWord < sumCarries) || carriesOverflow;
 
         // Z = Z - q*M where q = extraWord
         // This is: Z -= extraWord * mod + (overflow ? mod<<32 : 0)
