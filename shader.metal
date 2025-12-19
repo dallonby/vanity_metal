@@ -642,14 +642,15 @@ inline void jpoint_double(thread JPoint* r, thread const JPoint* p) {
     mod_add(&y4_8, &y4_8, &y4_8);
     mod_add(&y4_8, &y4_8, &y4_8);
 
+    // Z' = 2*Y*Z - must compute BEFORE modifying r->y due to aliasing (r may equal p)
+    mp_mod_mul(&r->z, &p->y, &p->z);
+    mod_add(&r->z, &r->z, &r->z);
+
+    // Y' = M*(S - X') - 8*Y^4
     mp_number sdiff;
     mp_mod_sub(&sdiff, &four_s, &r->x);
     mp_mod_mul(&r->y, &m, &sdiff);
     mp_mod_sub(&r->y, &r->y, &y4_8);
-
-    // Z' = 2*Y*Z
-    mp_mod_mul(&r->z, &p->y, &p->z);
-    mod_add(&r->z, &r->z, &r->z);
 }
 
 inline void jpoint_add(thread JPoint* r, thread const JPoint* p, thread const JPoint* q) {
