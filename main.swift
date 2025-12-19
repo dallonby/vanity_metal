@@ -21,8 +21,8 @@ struct VanityGenerator: ParsableCommand {
     @Option(name: .shortAndLong, help: "Number of GPU threads")
     var threads: Int = 65536
 
-    @Option(name: .shortAndLong, help: "Inverse batch size (smaller = better GPU occupancy)")
-    var batchSize: Int = 32
+    @Option(name: .shortAndLong, help: "Inverse batch size (profanity2 uses 255)")
+    var batchSize: Int = 255
 
     func run() throws {
         print("Vanity Address Generator (Metal/Apple Silicon) - Profanity-killer Edition")

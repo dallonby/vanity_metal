@@ -14,7 +14,7 @@ using namespace metal;
 // =============================================================================
 
 #define MP_WORDS 8
-#define BATCH_SIZE 32  // Smaller batch = less register pressure = better occupancy
+#define BATCH_SIZE 255  // Match profanity2's batch size
 
 typedef uint mp_word;
 
