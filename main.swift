@@ -67,14 +67,14 @@ struct VanityGenerator: ParsableCommand {
             throw ExitCode.failure
         }
 
-        // Thread configuration - must be divisible by batchSize (SIMD group size = 32)
+        // Thread configuration - must be divisible by batchSize
         let totalThreads = (threads / batchSize) * batchSize
+        let inverseThreads = totalThreads / batchSize
         let maxThreadsPerGroup = iteratePipeline.maxTotalThreadsPerThreadgroup
-        // Use 32 threads per group to align with SIMD groups for cooperative batch inverse
-        let threadGroupSize = MTLSize(width: 32, height: 1, depth: 1)
+        let threadGroupSize = MTLSize(width: min(256, maxThreadsPerGroup), height: 1, depth: 1)
 
-        print("Using \(totalThreads) GPU threads, SIMD batch size \(batchSize)")
-        print("Architecture: SIMD-cooperative batch inversion + lambda chaining")
+        print("Using \(totalThreads) GPU threads, batch size \(batchSize)")
+        print("Architecture: Batch inversion + lambda chaining (profanity2-style)")
         print("")
 
         // Allocate buffers (32-bit limbs, 8 words per number)
@@ -189,20 +189,21 @@ struct VanityGenerator: ParsableCommand {
                 commandBuffer.waitUntilCompleted()
             }
 
-            // Step 3: Run iterations with SIMD-cooperative batch inversion
-            // Each SIMD group of 32 threads cooperates on batch inverse
+            // Step 3: Run iterations with batch inversion
+            // Use single encoder, alternate between inverse and iterate kernels
             if let commandBuffer = commandQueue.makeCommandBuffer(),
                let encoder = commandBuffer.makeComputeCommandEncoder() {
 
-                let gridSize = MTLSize(width: totalThreads, height: 1, depth: 1)
+                let inverseGridSize = MTLSize(width: inverseThreads, height: 1, depth: 1)
+                let iterateGridSize = MTLSize(width: totalThreads, height: 1, depth: 1)
 
                 for _ in 0..<iterations {
-                    // Inverse kernel - now uses all threads with SIMD cooperation
+                    // Inverse kernel
                     encoder.setComputePipelineState(inversePipeline)
                     encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
                     encoder.setBuffer(inversesBuffer, offset: 0, index: 1)
                     encoder.setBytes(&batchSizeVal, length: MemoryLayout<UInt32>.size, index: 2)
-                    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
+                    encoder.dispatchThreads(inverseGridSize, threadsPerThreadgroup: threadGroupSize)
 
                     // Iterate kernel
                     encoder.setComputePipelineState(iteratePipeline)
@@ -215,7 +216,7 @@ struct VanityGenerator: ParsableCommand {
                     encoder.setBytes(&prefixLenVal, length: MemoryLayout<UInt32>.size, index: 6)
                     encoder.setBytes(&maxResultsVal, length: MemoryLayout<UInt32>.size, index: 7)
                     encoder.setBuffer(iterCounterBuffer, offset: 0, index: 8)
-                    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
+                    encoder.dispatchThreads(iterateGridSize, threadsPerThreadgroup: threadGroupSize)
                 }
 
                 encoder.endEncoding()
