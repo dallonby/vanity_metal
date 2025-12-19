@@ -276,6 +276,11 @@ struct VanityGenerator: ParsableCommand {
                             print("  DEBUG pubkey y: \(yHex)")
                             print("  DEBUG hash:     \(hashHex)")
                             print("  DEBUG address:  0x\(String(hashHex.dropFirst(26)))")
+
+                            // Verify: compute pubkey || cast keccak
+                            print("  VERIFY: Run these commands:")
+                            print("    cast keccak \"0x\(String(xHex.dropFirst(2)))\(String(yHex.dropFirst(2)))\"")
+                            print("    cast wallet address --private-key \(hexKey)")
                         }
                     }
                 }
