@@ -209,7 +209,7 @@ inline void mp_mod_mul(thread mp_number* r, thread const mp_number* X, thread co
         mp_word cM = 0, cA = 0;
         for (mp_word j = 0; j < MP_WORDS; ++j) {
             mp_word tM = X->d[j] * Y->d[i] + cM;
-            cM = mul_hi(X->d[j], Y->d[i]) + (tM < cM);
+            cM = mulhi(X->d[j], Y->d[i]) + (tM < cM);
 
             Z.d[j] += tM + cA;
             cA = Z.d[j] < tM ? 1 : (Z.d[j] == tM ? cA : 0);
@@ -227,7 +227,7 @@ inline void mp_mod_mul(thread mp_number* r, thread const mp_number* X, thread co
 
         for (mp_word j = 0; j < MP_WORDS; ++j) {
             mp_word tM = mod.d[j] * extraWord + cM;
-            cM = mul_hi(mod.d[j], extraWord) + (tM < cM);
+            cM = mulhi(mod.d[j], extraWord) + (tM < cM);
 
             tM += (overflow ? modhigher.d[j] : 0) + cA;
             cA = tM < (overflow ? modhigher.d[j] : 0) ? 1 : (tM == (overflow ? modhigher.d[j] : 0) ? cA : 0);
@@ -778,7 +778,9 @@ kernel void compute_initial_points(
     mp_mod_sub(&newPx, &newPx, &px);
 
     // Store delta: newPx - Gx
-    mp_mod_sub_gx(&deltaX[tid], &newPx);
+    mp_number delta;
+    mp_mod_sub_gx(&delta, &newPx);
+    deltaX[tid] = delta;
 
     // Store lambda
     prevLambda[tid] = lambda;
