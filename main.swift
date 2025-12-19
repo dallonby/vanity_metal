@@ -16,7 +16,7 @@ struct VanityGenerator: ParsableCommand {
     var prefix: String = "badbad"
 
     @Option(name: .shortAndLong, help: "Iterations per batch (more = less overhead)")
-    var iterations: Int = 4000  // More iterations per batch reduces dispatch overhead
+    var iterations: Int = 2000  // Balanced - more iterations can cause hangs
 
     @Option(name: .shortAndLong, help: "Number of GPU threads")
     var threads: Int = 1048576  // 1M threads - best throughput
