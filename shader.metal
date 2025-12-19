@@ -496,7 +496,6 @@ kernel void profanity_iterate(
 // =============================================================================
 // Batch inverse kernel - simple sequential version (like profanity2)
 // One thread per batch, processes BATCH_SIZE points sequentially
-// This is actually efficient because the work is compute-bound, not memory-bound
 // =============================================================================
 
 kernel void profanity_inverse_batch(
@@ -507,8 +506,6 @@ kernel void profanity_inverse_batch(
 ) {
     const uint baseId = tid * batchSize;
 
-    // Use smaller local arrays to reduce register pressure
-    // Process in chunks if batchSize is large
     mp_number products[BATCH_SIZE];
     mp_number originals[BATCH_SIZE];
 
@@ -538,6 +535,115 @@ kernel void profanity_inverse_batch(
         inverses[baseId + i] = thisInv;
     }
     inverses[baseId] = inv;
+}
+
+// =============================================================================
+// Combined inverse + iterate kernel - single dispatch per iteration
+// Each thread computes its own inverse (trades batch savings for fewer dispatches)
+// =============================================================================
+
+kernel void profanity_combined(
+    device mp_number* deltaX [[buffer(0)]],
+    device mp_number* prevLambda [[buffer(1)]],
+    device uint* results [[buffer(2)]],
+    device atomic_uint* foundCount [[buffer(3)]],
+    constant uchar* prefix [[buffer(4)]],
+    constant uint& prefixLen [[buffer(5)]],
+    constant uint& maxResults [[buffer(6)]],
+    device uint* iterCounter [[buffer(7)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    // Increment iteration counter
+    uint iter = iterCounter[tid];
+    iterCounter[tid] = iter + 1;
+
+    // Load state
+    mp_number dX = deltaX[tid];
+    mp_number lambda = prevLambda[tid];
+
+    // Compute inverse of dX
+    mp_number inv = dX;
+    mp_mod_inverse(&inv);
+
+    // Multiply by -2Gy
+    mp_number neg2gy;
+    for (int j = 0; j < MP_WORDS; j++) neg2gy.d[j] = NEG_2GY.d[j];
+    mp_mod_mul(&inv, &inv, &neg2gy);
+
+    // λ' = inv - λ = (-2Gy/dX) - λ
+    mp_mod_sub(&lambda, &inv, &lambda);
+
+    // λ² = λ * λ
+    mp_number lambda2;
+    mp_mod_mul(&lambda2, &lambda, &lambda);
+
+    // d' = λ² - d - 3Gx = (-3Gx) - (d - λ²)
+    mp_mod_sub(&dX, &dX, &lambda2);
+    mp_mod_sub_const(&dX, &TRIPLE_NEG_GX, &dX);
+
+    // Store updated state
+    deltaX[tid] = dX;
+    prevLambda[tid] = lambda;
+
+    // Compute y from lambda and deltaX
+    // y = (-Gy) - λ * d'
+    mp_number y;
+    mp_mod_mul(&y, &lambda, &dX);
+    mp_mod_sub_const(&y, &NEG_GY, &y);
+
+    // Recover x = dX - (-Gx) = dX + Gx
+    mp_number x;
+    mp_number negGx;
+    for (int i = 0; i < MP_WORDS; i++) negGx.d[i] = NEG_GX.d[i];
+    mp_mod_sub(&x, &dX, &negGx);
+
+    // Compute keccak256(x || y)
+    uint64_t state[25] = {0};
+
+    #define BSWAP32(n) (rotate(n & 0x00FF00FF, 24U)|(rotate(n, 8U) & 0x00FF00FF))
+
+    uint32_t pubkey[16];
+    pubkey[0]  = BSWAP32(x.d[7]); pubkey[1]  = BSWAP32(x.d[6]);
+    pubkey[2]  = BSWAP32(x.d[5]); pubkey[3]  = BSWAP32(x.d[4]);
+    pubkey[4]  = BSWAP32(x.d[3]); pubkey[5]  = BSWAP32(x.d[2]);
+    pubkey[6]  = BSWAP32(x.d[1]); pubkey[7]  = BSWAP32(x.d[0]);
+    pubkey[8]  = BSWAP32(y.d[7]); pubkey[9]  = BSWAP32(y.d[6]);
+    pubkey[10] = BSWAP32(y.d[5]); pubkey[11] = BSWAP32(y.d[4]);
+    pubkey[12] = BSWAP32(y.d[3]); pubkey[13] = BSWAP32(y.d[2]);
+    pubkey[14] = BSWAP32(y.d[1]); pubkey[15] = BSWAP32(y.d[0]);
+
+    for (int i = 0; i < 8; i++) {
+        state[i] = uint64_t(pubkey[i*2]) | (uint64_t(pubkey[i*2+1]) << 32);
+    }
+
+    state[8] ^= 0x01;
+    state[16] ^= 0x8000000000000000ULL;
+
+    keccak_f1600(state);
+
+    uchar hash[32];
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 8; j++) {
+            hash[i*8 + j] = (state[i] >> (j*8)) & 0xFF;
+        }
+    }
+
+    // Check prefix match
+    bool match = true;
+    for (uint i = 0; i < prefixLen && match; i++) {
+        uchar addrByte = hash[12 + i/2];
+        uchar addrNibble = (i % 2 == 0) ? (addrByte >> 4) : (addrByte & 0x0F);
+        uchar prefixNibble = (i % 2 == 0) ? (prefix[i/2] >> 4) : (prefix[i/2] & 0x0F);
+        if (addrNibble != prefixNibble) match = false;
+    }
+
+    if (match) {
+        uint idx = atomic_fetch_add_explicit(foundCount, 1, memory_order_relaxed);
+        if (idx < maxResults) {
+            results[idx * 2] = tid;
+            results[idx * 2 + 1] = iter;
+        }
+    }
 }
 
 // =============================================================================
