@@ -377,7 +377,7 @@ inline void mp_mod_inverse(thread mp_number* r) {
         }
     }
 
-    // Reduce C: subtract mod while extraC is non-zero or C >= mod
+    // Reduce C: subtract mod while extraC is non-zero
     while (extraC) {
         mp_word c = 0;
         for (mp_word i = 0; i < MP_WORDS; ++i) {
@@ -385,9 +385,23 @@ inline void mp_mod_inverse(thread mp_number* r) {
             c = t > C.d[i] ? 1 : (t == C.d[i] ? c : 0);
             C.d[i] = t;
         }
-        // If no borrow (c=0), we successfully subtracted mod, decrease extraC
-        // If borrow occurred (c=1), we borrowed from extraC, also decrease it
+        // Each subtraction of mod decreases extraC by 1
         extraC -= 1;
+    }
+
+    // Final reduction: if C >= mod, subtract mod once more
+    bool gte = true;
+    for (int i = MP_WORDS - 1; i >= 0; --i) {
+        if (C.d[i] > mod.d[i]) break;
+        if (C.d[i] < mod.d[i]) { gte = false; break; }
+    }
+    if (gte) {
+        mp_word c = 0;
+        for (mp_word i = 0; i < MP_WORDS; ++i) {
+            mp_word t = C.d[i] - mod.d[i] - c;
+            c = t > C.d[i] ? 1 : (t == C.d[i] ? c : 0);
+            C.d[i] = t;
+        }
     }
 
     // r = mod - C
