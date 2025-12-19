@@ -414,9 +414,10 @@ kernel void profanity_iterate(
     device uint* iterCounter [[buffer(8)]],         // Per-thread iteration counter
     uint tid [[thread_position_in_grid]]
 ) {
-    // Increment iteration counter
-    uint iter = iterCounter[tid];
-    iterCounter[tid] = iter + 1;
+    // Increment iteration counter and read the NEW value
+    // iter represents which point we're checking: k + iter + 1
+    uint iter = iterCounter[tid] + 1;
+    iterCounter[tid] = iter;
 
     // Load state
     mp_number dX = deltaX[tid];

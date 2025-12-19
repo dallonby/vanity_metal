@@ -238,11 +238,10 @@ struct VanityGenerator: ParsableCommand {
                     // Recover private key: original key + iteration offset
                     if threadId < storedPrivateKeys.count {
                         var privateKey = storedPrivateKeys[threadId]
-                        // Add iteration + 2 to get the actual key:
-                        // - compute_initial_points stores state for (k+1)*G
-                        // - profanity_iterate first advances to (k+2)*G, then checks
-                        // - So iter=0 checks (k+2)*G, iter=N checks (k+N+2)*G
-                        addToKey(&privateKey, UInt64(iteration + 2))
+                        // Add iteration + 1 to get the actual key:
+                        // - iter=1 checks (k+2)*G, key = k+2 = k + iter + 1
+                        // - iter=N checks (k+N+1)*G, key = k+N+1 = k + iter + 1
+                        addToKey(&privateKey, UInt64(iteration + 1))
                         let hexKey = formatKeyAsHex(privateKey)
                         print("\nFound #\(i + 1): Private Key = \(hexKey)")
                     }
