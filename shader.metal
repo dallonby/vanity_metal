@@ -61,53 +61,72 @@ constant uint64_t KECCAK_RC[24] = {
 
 #define ROTL64(x, n) (((x) << (n)) | ((x) >> (64 - (n))))
 
+// Keccak round macro for full unrolling
+#define KECCAK_ROUND(RC) do { \
+    bc0 = st[0] ^ st[5] ^ st[10] ^ st[15] ^ st[20]; \
+    bc1 = st[1] ^ st[6] ^ st[11] ^ st[16] ^ st[21]; \
+    bc2 = st[2] ^ st[7] ^ st[12] ^ st[17] ^ st[22]; \
+    bc3 = st[3] ^ st[8] ^ st[13] ^ st[18] ^ st[23]; \
+    bc4 = st[4] ^ st[9] ^ st[14] ^ st[19] ^ st[24]; \
+    t = bc4 ^ ROTL64(bc1, 1); st[0] ^= t; st[5] ^= t; st[10] ^= t; st[15] ^= t; st[20] ^= t; \
+    t = bc0 ^ ROTL64(bc2, 1); st[1] ^= t; st[6] ^= t; st[11] ^= t; st[16] ^= t; st[21] ^= t; \
+    t = bc1 ^ ROTL64(bc3, 1); st[2] ^= t; st[7] ^= t; st[12] ^= t; st[17] ^= t; st[22] ^= t; \
+    t = bc2 ^ ROTL64(bc4, 1); st[3] ^= t; st[8] ^= t; st[13] ^= t; st[18] ^= t; st[23] ^= t; \
+    t = bc3 ^ ROTL64(bc0, 1); st[4] ^= t; st[9] ^= t; st[14] ^= t; st[19] ^= t; st[24] ^= t; \
+    t = st[1]; \
+    st[1]  = ROTL64(st[6], 44);  st[6]  = ROTL64(st[9], 20); \
+    st[9]  = ROTL64(st[22], 61); st[22] = ROTL64(st[14], 39); \
+    st[14] = ROTL64(st[20], 18); st[20] = ROTL64(st[2], 62); \
+    st[2]  = ROTL64(st[12], 43); st[12] = ROTL64(st[13], 25); \
+    st[13] = ROTL64(st[19], 8);  st[19] = ROTL64(st[23], 56); \
+    st[23] = ROTL64(st[15], 41); st[15] = ROTL64(st[4], 27); \
+    st[4]  = ROTL64(st[24], 14); st[24] = ROTL64(st[21], 2); \
+    st[21] = ROTL64(st[8], 55);  st[8]  = ROTL64(st[16], 45); \
+    st[16] = ROTL64(st[5], 36);  st[5]  = ROTL64(st[3], 28); \
+    st[3]  = ROTL64(st[18], 21); st[18] = ROTL64(st[17], 15); \
+    st[17] = ROTL64(st[11], 10); st[11] = ROTL64(st[7], 6); \
+    st[7]  = ROTL64(st[10], 3);  st[10] = ROTL64(t, 1); \
+    bc0 = st[0]; bc1 = st[1]; bc2 = st[2]; bc3 = st[3]; bc4 = st[4]; \
+    st[0] ^= (~bc1) & bc2; st[1] ^= (~bc2) & bc3; st[2] ^= (~bc3) & bc4; st[3] ^= (~bc4) & bc0; st[4] ^= (~bc0) & bc1; \
+    bc0 = st[5]; bc1 = st[6]; bc2 = st[7]; bc3 = st[8]; bc4 = st[9]; \
+    st[5] ^= (~bc1) & bc2; st[6] ^= (~bc2) & bc3; st[7] ^= (~bc3) & bc4; st[8] ^= (~bc4) & bc0; st[9] ^= (~bc0) & bc1; \
+    bc0 = st[10]; bc1 = st[11]; bc2 = st[12]; bc3 = st[13]; bc4 = st[14]; \
+    st[10] ^= (~bc1) & bc2; st[11] ^= (~bc2) & bc3; st[12] ^= (~bc3) & bc4; st[13] ^= (~bc4) & bc0; st[14] ^= (~bc0) & bc1; \
+    bc0 = st[15]; bc1 = st[16]; bc2 = st[17]; bc3 = st[18]; bc4 = st[19]; \
+    st[15] ^= (~bc1) & bc2; st[16] ^= (~bc2) & bc3; st[17] ^= (~bc3) & bc4; st[18] ^= (~bc4) & bc0; st[19] ^= (~bc0) & bc1; \
+    bc0 = st[20]; bc1 = st[21]; bc2 = st[22]; bc3 = st[23]; bc4 = st[24]; \
+    st[20] ^= (~bc1) & bc2; st[21] ^= (~bc2) & bc3; st[22] ^= (~bc3) & bc4; st[23] ^= (~bc4) & bc0; st[24] ^= (~bc0) & bc1; \
+    st[0] ^= (RC); \
+} while(0)
+
 inline void keccak_f1600(thread uint64_t* st) {
-    uint64_t bc[5], t;
+    uint64_t bc0, bc1, bc2, bc3, bc4, t;
 
-    for (int r = 0; r < 24; r++) {
-        // Theta
-        bc[0] = st[0] ^ st[5] ^ st[10] ^ st[15] ^ st[20];
-        bc[1] = st[1] ^ st[6] ^ st[11] ^ st[16] ^ st[21];
-        bc[2] = st[2] ^ st[7] ^ st[12] ^ st[17] ^ st[22];
-        bc[3] = st[3] ^ st[8] ^ st[13] ^ st[18] ^ st[23];
-        bc[4] = st[4] ^ st[9] ^ st[14] ^ st[19] ^ st[24];
-
-        t = bc[4] ^ ROTL64(bc[1], 1); st[0] ^= t; st[5] ^= t; st[10] ^= t; st[15] ^= t; st[20] ^= t;
-        t = bc[0] ^ ROTL64(bc[2], 1); st[1] ^= t; st[6] ^= t; st[11] ^= t; st[16] ^= t; st[21] ^= t;
-        t = bc[1] ^ ROTL64(bc[3], 1); st[2] ^= t; st[7] ^= t; st[12] ^= t; st[17] ^= t; st[22] ^= t;
-        t = bc[2] ^ ROTL64(bc[4], 1); st[3] ^= t; st[8] ^= t; st[13] ^= t; st[18] ^= t; st[23] ^= t;
-        t = bc[3] ^ ROTL64(bc[0], 1); st[4] ^= t; st[9] ^= t; st[14] ^= t; st[19] ^= t; st[24] ^= t;
-
-        // Rho + Pi
-        t = st[1];
-        st[1]  = ROTL64(st[6], 44);  st[6]  = ROTL64(st[9], 20);
-        st[9]  = ROTL64(st[22], 61); st[22] = ROTL64(st[14], 39);
-        st[14] = ROTL64(st[20], 18); st[20] = ROTL64(st[2], 62);
-        st[2]  = ROTL64(st[12], 43); st[12] = ROTL64(st[13], 25);
-        st[13] = ROTL64(st[19], 8);  st[19] = ROTL64(st[23], 56);
-        st[23] = ROTL64(st[15], 41); st[15] = ROTL64(st[4], 27);
-        st[4]  = ROTL64(st[24], 14); st[24] = ROTL64(st[21], 2);
-        st[21] = ROTL64(st[8], 55);  st[8]  = ROTL64(st[16], 45);
-        st[16] = ROTL64(st[5], 36);  st[5]  = ROTL64(st[3], 28);
-        st[3]  = ROTL64(st[18], 21); st[18] = ROTL64(st[17], 15);
-        st[17] = ROTL64(st[11], 10); st[11] = ROTL64(st[7], 6);
-        st[7]  = ROTL64(st[10], 3);  st[10] = ROTL64(t, 1);
-
-        // Chi
-        bc[0] = st[0]; bc[1] = st[1]; bc[2] = st[2]; bc[3] = st[3]; bc[4] = st[4];
-        st[0] ^= (~bc[1]) & bc[2]; st[1] ^= (~bc[2]) & bc[3]; st[2] ^= (~bc[3]) & bc[4]; st[3] ^= (~bc[4]) & bc[0]; st[4] ^= (~bc[0]) & bc[1];
-        bc[0] = st[5]; bc[1] = st[6]; bc[2] = st[7]; bc[3] = st[8]; bc[4] = st[9];
-        st[5] ^= (~bc[1]) & bc[2]; st[6] ^= (~bc[2]) & bc[3]; st[7] ^= (~bc[3]) & bc[4]; st[8] ^= (~bc[4]) & bc[0]; st[9] ^= (~bc[0]) & bc[1];
-        bc[0] = st[10]; bc[1] = st[11]; bc[2] = st[12]; bc[3] = st[13]; bc[4] = st[14];
-        st[10] ^= (~bc[1]) & bc[2]; st[11] ^= (~bc[2]) & bc[3]; st[12] ^= (~bc[3]) & bc[4]; st[13] ^= (~bc[4]) & bc[0]; st[14] ^= (~bc[0]) & bc[1];
-        bc[0] = st[15]; bc[1] = st[16]; bc[2] = st[17]; bc[3] = st[18]; bc[4] = st[19];
-        st[15] ^= (~bc[1]) & bc[2]; st[16] ^= (~bc[2]) & bc[3]; st[17] ^= (~bc[3]) & bc[4]; st[18] ^= (~bc[4]) & bc[0]; st[19] ^= (~bc[0]) & bc[1];
-        bc[0] = st[20]; bc[1] = st[21]; bc[2] = st[22]; bc[3] = st[23]; bc[4] = st[24];
-        st[20] ^= (~bc[1]) & bc[2]; st[21] ^= (~bc[2]) & bc[3]; st[22] ^= (~bc[3]) & bc[4]; st[23] ^= (~bc[4]) & bc[0]; st[24] ^= (~bc[0]) & bc[1];
-
-        // Iota
-        st[0] ^= KECCAK_RC[r];
-    }
+    // Fully unrolled 24 rounds - eliminates loop overhead and enables better instruction scheduling
+    KECCAK_ROUND(0x0000000000000001ULL);
+    KECCAK_ROUND(0x0000000000008082ULL);
+    KECCAK_ROUND(0x800000000000808aULL);
+    KECCAK_ROUND(0x8000000080008000ULL);
+    KECCAK_ROUND(0x000000000000808bULL);
+    KECCAK_ROUND(0x0000000080000001ULL);
+    KECCAK_ROUND(0x8000000080008081ULL);
+    KECCAK_ROUND(0x8000000000008009ULL);
+    KECCAK_ROUND(0x000000000000008aULL);
+    KECCAK_ROUND(0x0000000000000088ULL);
+    KECCAK_ROUND(0x0000000080008009ULL);
+    KECCAK_ROUND(0x000000008000000aULL);
+    KECCAK_ROUND(0x000000008000808bULL);
+    KECCAK_ROUND(0x800000000000008bULL);
+    KECCAK_ROUND(0x8000000000008089ULL);
+    KECCAK_ROUND(0x8000000000008003ULL);
+    KECCAK_ROUND(0x8000000000008002ULL);
+    KECCAK_ROUND(0x8000000000000080ULL);
+    KECCAK_ROUND(0x000000000000800aULL);
+    KECCAK_ROUND(0x800000008000000aULL);
+    KECCAK_ROUND(0x8000000080008081ULL);
+    KECCAK_ROUND(0x8000000000008080ULL);
+    KECCAK_ROUND(0x0000000080000001ULL);
+    KECCAK_ROUND(0x8000000080008008ULL);
 }
 
 // =============================================================================
