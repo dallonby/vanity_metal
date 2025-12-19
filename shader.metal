@@ -620,8 +620,13 @@ inline void jpoint_double(thread JPoint* r, thread const JPoint* p) {
     auto mod_add = [](thread mp_number* result, thread const mp_number* a, thread const mp_number* b) {
         mp_word c = 0;
         for (int i = 0; i < MP_WORDS; i++) {
-            result->d[i] = a->d[i] + b->d[i] + c;
-            c = result->d[i] < a->d[i] ? 1 : (result->d[i] == a->d[i] ? c : 0);
+            // Add a + b first, detect overflow
+            mp_word sum_ab = a->d[i] + b->d[i];
+            mp_word c1 = sum_ab < a->d[i] ? 1 : 0;
+            // Add carry, detect overflow
+            result->d[i] = sum_ab + c;
+            mp_word c2 = result->d[i] < sum_ab ? 1 : 0;
+            c = c1 | c2;  // Either overflow sets carry
         }
         // If carry is set, result is definitely >= mod (since mod < 2^256)
         // Otherwise check if result >= mod
@@ -689,8 +694,13 @@ inline void jpoint_add(thread JPoint* r, thread const JPoint* p, thread const JP
     auto mod_add = [](thread mp_number* result, thread const mp_number* a, thread const mp_number* b) {
         mp_word c = 0;
         for (int i = 0; i < MP_WORDS; i++) {
-            result->d[i] = a->d[i] + b->d[i] + c;
-            c = result->d[i] < a->d[i] ? 1 : (result->d[i] == a->d[i] ? c : 0);
+            // Add a + b first, detect overflow
+            mp_word sum_ab = a->d[i] + b->d[i];
+            mp_word c1 = sum_ab < a->d[i] ? 1 : 0;
+            // Add carry, detect overflow
+            result->d[i] = sum_ab + c;
+            mp_word c2 = result->d[i] < sum_ab ? 1 : 0;
+            c = c1 | c2;  // Either overflow sets carry
         }
         // If carry is set, result is definitely >= mod (since mod < 2^256)
         // Otherwise check if result >= mod
