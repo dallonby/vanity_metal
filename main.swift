@@ -6,7 +6,7 @@ import ArgumentParser
 struct VanityGenerator: ParsableCommand {
     static var configuration = CommandConfiguration(
         commandName: "vanity_metal",
-        abstract: "GPU-accelerated vanity Ethereum address generator for Apple Silicon"
+        abstract: "GPU-accelerated vanity Ethereum address generator for Apple Silicon (Profanity-killer edition)"
     )
 
     @Option(name: .shortAndLong, help: "Number of addresses to generate")
@@ -15,14 +15,14 @@ struct VanityGenerator: ParsableCommand {
     @Option(name: .shortAndLong, help: "Address prefix to match (without 0x)")
     var prefix: String = "badbad"
 
-    @Option(name: .shortAndLong, help: "Iterations per GPU thread")
-    var iterations: Int = 1000
+    @Option(name: .shortAndLong, help: "Iterations per dispatch")
+    var iterations: Int = 256
 
     @Option(name: .shortAndLong, help: "Number of GPU threads")
-    var threads: Int = 16384
+    var threads: Int = 65536
 
     func run() throws {
-        print("Vanity Address Generator (Metal/Apple Silicon)")
+        print("Vanity Address Generator (Metal/Apple Silicon) - Profanity-killer Edition")
         print("Finding \(count) addresses with prefix 0x\(prefix)")
         print("---")
 
@@ -36,11 +36,9 @@ struct VanityGenerator: ParsableCommand {
         // Load the shader
         let library: MTLLibrary
         do {
-            // Try loading precompiled metallib first
             if FileManager.default.fileExists(atPath: "./shader.metallib") {
                 library = try device.makeLibrary(filepath: "./shader.metallib")
             } else {
-                // Fall back to compiling from source
                 let sourceCode = try String(contentsOfFile: "./shader.metal", encoding: .utf8)
                 library = try device.makeLibrary(source: sourceCode, options: nil)
             }
@@ -49,15 +47,15 @@ struct VanityGenerator: ParsableCommand {
             throw ExitCode.failure
         }
 
-        // Get both kernels
-        guard let precomputeKernel = library.makeFunction(name: "compute_public_key"),
-              let searchKernel = library.makeFunction(name: "vanity_search") else {
+        // Get kernels
+        guard let initKernel = library.makeFunction(name: "compute_initial_points"),
+              let iterateKernel = library.makeFunction(name: "profanity_iterate") else {
             print("Error: Could not find kernel functions")
             throw ExitCode.failure
         }
 
-        let precomputePipeline = try device.makeComputePipelineState(function: precomputeKernel)
-        let searchPipeline = try device.makeComputePipelineState(function: searchKernel)
+        let initPipeline = try device.makeComputePipelineState(function: initKernel)
+        let iteratePipeline = try device.makeComputePipelineState(function: iterateKernel)
 
         guard let commandQueue = device.makeCommandQueue() else {
             print("Error: Could not create command queue")
@@ -66,32 +64,38 @@ struct VanityGenerator: ParsableCommand {
 
         // Thread configuration
         let totalThreads = threads
-        let maxThreadsPerGroup = searchPipeline.maxTotalThreadsPerThreadgroup
+        let maxThreadsPerGroup = iteratePipeline.maxTotalThreadsPerThreadgroup
         let threadGroupSize = MTLSize(width: min(256, maxThreadsPerGroup), height: 1, depth: 1)
 
-        print("Using \(totalThreads) GPU threads, \(iterations) iterations each")
-        print("Optimization: Precompute public keys, then increment with P+G")
+        print("Using \(totalThreads) GPU threads")
+        print("Architecture: Lambda chaining with delta storage (profanity2-style)")
         print("")
 
-        // Allocate buffers
-        // Private keys: 4 x uint64 per thread
-        let keysSize = totalThreads * 4 * MemoryLayout<UInt64>.size
-        guard let privateKeysBuffer = device.makeBuffer(length: keysSize, options: .storageModeShared) else {
+        // Allocate buffers (32-bit limbs, 8 words per number)
+        let wordsPerNumber = 8
+        let bytesPerNumber = wordsPerNumber * MemoryLayout<UInt32>.size
+
+        // Private keys: 8 x uint32 per thread
+        guard let privateKeysBuffer = device.makeBuffer(length: totalThreads * bytesPerNumber, options: .storageModeShared) else {
             print("Error: Could not allocate private keys buffer")
             throw ExitCode.failure
         }
 
-        // Public points: 8 x uint64 per thread (x and y coordinates)
-        let pointsSize = totalThreads * 8 * MemoryLayout<UInt64>.size
-        guard let publicPointsBuffer = device.makeBuffer(length: pointsSize, options: .storageModeShared) else {
-            print("Error: Could not allocate public points buffer")
+        // DeltaX: 8 x uint32 per thread
+        guard let deltaXBuffer = device.makeBuffer(length: totalThreads * bytesPerNumber, options: .storageModeShared) else {
+            print("Error: Could not allocate deltaX buffer")
             throw ExitCode.failure
         }
 
-        // Results buffer
-        let maxResults = count
-        let resultsSize = maxResults * 4 * MemoryLayout<UInt64>.size
-        guard let resultsBuffer = device.makeBuffer(length: resultsSize, options: .storageModeShared) else {
+        // Previous lambda: 8 x uint32 per thread
+        guard let prevLambdaBuffer = device.makeBuffer(length: totalThreads * bytesPerNumber, options: .storageModeShared) else {
+            print("Error: Could not allocate prevLambda buffer")
+            throw ExitCode.failure
+        }
+
+        // Results buffer (thread IDs of matches)
+        let maxResults = count * 10  // Allow for some buffer
+        guard let resultsBuffer = device.makeBuffer(length: maxResults * MemoryLayout<UInt32>.size, options: .storageModeShared) else {
             print("Error: Could not allocate results buffer")
             throw ExitCode.failure
         }
@@ -113,35 +117,47 @@ struct VanityGenerator: ParsableCommand {
 
         var prefixLenVal = prefixLen
         var maxResultsVal = UInt32(maxResults)
-        var iterationsVal = UInt32(iterations)
 
         let startTime = Date()
         var totalKeysChecked: UInt64 = 0
         var foundResults = 0
         var batchCount = 0
 
+        // Store original private keys for result recovery
+        var storedPrivateKeys: [[UInt32]] = []
+
         // Main loop
         while foundResults < count {
             batchCount += 1
 
             // Step 1: Generate cryptographically secure random private keys
-            // CRITICAL: Use SecRandomCopyBytes (CSPRNG) to avoid Profanity1-style vulnerabilities
-            // Profanity1 used weak 32-bit seeds, leading to ~$160M in stolen funds (Wintermute hack)
             let keysPtr = privateKeysBuffer.contents()
-            let keysByteCount = totalThreads * 4 * MemoryLayout<UInt64>.size
+            let keysByteCount = totalThreads * bytesPerNumber
             let status = SecRandomCopyBytes(kSecRandomDefault, keysByteCount, keysPtr)
             guard status == errSecSuccess else {
                 print("\nError: Failed to generate secure random bytes (status: \(status))")
                 throw ExitCode.failure
             }
 
-            // Step 2: Precompute public keys on GPU (one-time cost per batch)
+            // Store private keys for later recovery
+            let keysTypedPtr = keysPtr.bindMemory(to: UInt32.self, capacity: totalThreads * wordsPerNumber)
+            storedPrivateKeys = []
+            for t in 0..<totalThreads {
+                var key = [UInt32](repeating: 0, count: wordsPerNumber)
+                for w in 0..<wordsPerNumber {
+                    key[w] = keysTypedPtr[t * wordsPerNumber + w]
+                }
+                storedPrivateKeys.append(key)
+            }
+
+            // Step 2: Compute initial points (slow, once per batch)
             if let commandBuffer = commandQueue.makeCommandBuffer(),
                let encoder = commandBuffer.makeComputeCommandEncoder() {
 
-                encoder.setComputePipelineState(precomputePipeline)
+                encoder.setComputePipelineState(initPipeline)
                 encoder.setBuffer(privateKeysBuffer, offset: 0, index: 0)
-                encoder.setBuffer(publicPointsBuffer, offset: 0, index: 1)
+                encoder.setBuffer(deltaXBuffer, offset: 0, index: 1)
+                encoder.setBuffer(prevLambdaBuffer, offset: 0, index: 2)
 
                 let gridSize = MTLSize(width: totalThreads, height: 1, depth: 1)
                 encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
@@ -151,30 +167,59 @@ struct VanityGenerator: ParsableCommand {
                 commandBuffer.waitUntilCompleted()
             }
 
-            // Step 3: Run the optimized search kernel
-            if let commandBuffer = commandQueue.makeCommandBuffer(),
-               let encoder = commandBuffer.makeComputeCommandEncoder() {
+            // Step 3: Run iterations
+            for iter in 0..<iterations {
+                if let commandBuffer = commandQueue.makeCommandBuffer(),
+                   let encoder = commandBuffer.makeComputeCommandEncoder() {
 
-                encoder.setComputePipelineState(searchPipeline)
-                encoder.setBuffer(publicPointsBuffer, offset: 0, index: 0)
-                encoder.setBuffer(privateKeysBuffer, offset: 0, index: 1)
-                encoder.setBuffer(resultsBuffer, offset: 0, index: 2)
-                encoder.setBuffer(foundCountBuffer, offset: 0, index: 3)
-                encoder.setBuffer(prefixBuffer, offset: 0, index: 4)
-                encoder.setBytes(&prefixLenVal, length: MemoryLayout<UInt32>.size, index: 5)
-                encoder.setBytes(&maxResultsVal, length: MemoryLayout<UInt32>.size, index: 6)
-                encoder.setBytes(&iterationsVal, length: MemoryLayout<UInt32>.size, index: 7)
+                    encoder.setComputePipelineState(iteratePipeline)
+                    encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
+                    encoder.setBuffer(prevLambdaBuffer, offset: 0, index: 1)
+                    encoder.setBuffer(resultsBuffer, offset: 0, index: 2)
+                    encoder.setBuffer(foundCountBuffer, offset: 0, index: 3)
+                    encoder.setBuffer(prefixBuffer, offset: 0, index: 4)
+                    encoder.setBytes(&prefixLenVal, length: MemoryLayout<UInt32>.size, index: 5)
+                    encoder.setBytes(&maxResultsVal, length: MemoryLayout<UInt32>.size, index: 6)
 
-                let gridSize = MTLSize(width: totalThreads, height: 1, depth: 1)
-                encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
-                encoder.endEncoding()
+                    let gridSize = MTLSize(width: totalThreads, height: 1, depth: 1)
+                    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
+                    encoder.endEncoding()
 
-                commandBuffer.commit()
-                commandBuffer.waitUntilCompleted()
+                    commandBuffer.commit()
+                    commandBuffer.waitUntilCompleted()
+                }
+
+                totalKeysChecked += UInt64(totalThreads)
+                let newFoundCount = Int(foundCountBuffer.contents().bindMemory(to: UInt32.self, capacity: 1).pointee)
+
+                // Check for new results
+                if newFoundCount > foundResults {
+                    let resultsPtr = resultsBuffer.contents().bindMemory(to: UInt32.self, capacity: maxResults)
+
+                    for i in foundResults..<min(newFoundCount, count) {
+                        let threadId = Int(resultsPtr[i])
+
+                        // Recover private key: original key + iteration offset
+                        if threadId < storedPrivateKeys.count {
+                            var privateKey = storedPrivateKeys[threadId]
+
+                            // Add (iter + 1) to the key (since we already advanced by 1 in init)
+                            // The kernel checks AFTER incrementing, so the key that matched was at iteration 'iter'
+                            // Actually the init already moved to next point, so offset is iter + 1
+                            addToKey(&privateKey, UInt64(iter + 1))
+
+                            // Format as big-endian hex
+                            let hexKey = formatKeyAsHex(privateKey)
+                            print("\nFound #\(i + 1): Private Key = \(hexKey)")
+                        }
+                    }
+
+                    foundResults = min(newFoundCount, count)
+                    if foundResults >= count {
+                        break
+                    }
+                }
             }
-
-            totalKeysChecked += UInt64(totalThreads) * UInt64(iterations)
-            foundResults = Int(foundCountBuffer.contents().bindMemory(to: UInt32.self, capacity: 1).pointee)
 
             // Print progress
             let elapsed = Date().timeIntervalSince(startTime)
@@ -184,26 +229,7 @@ struct VanityGenerator: ParsableCommand {
         }
 
         print("\n---")
-
-        // Read and display results
-        let resultsPtr = resultsBuffer.contents().bindMemory(to: UInt64.self, capacity: maxResults * 4)
-        for i in 0..<count {
-            let limbs = (
-                resultsPtr[i * 4 + 0],
-                resultsPtr[i * 4 + 1],
-                resultsPtr[i * 4 + 2],
-                resultsPtr[i * 4 + 3]
-            )
-
-            // Format as big-endian hex (most significant limb first)
-            let privateKeyHex = String(format: "0x%016llx%016llx%016llx%016llx",
-                                       limbs.3, limbs.2, limbs.1, limbs.0)
-
-            print("Found #\(i + 1): Private Key = \(privateKeyHex)")
-        }
-
         let elapsed = Date().timeIntervalSince(startTime)
-        print("---")
         print(String(format: "Generated %d addresses in %.2fs (%.2fM keys/sec average)",
                      count, elapsed, Double(totalKeysChecked) / elapsed / 1_000_000))
     }
@@ -225,6 +251,26 @@ struct VanityGenerator: ParsableCommand {
             index = nextIndex
         }
         return bytes
+    }
+
+    func addToKey(_ key: inout [UInt32], _ value: UInt64) {
+        // Add value to little-endian 256-bit number
+        var carry = value
+        for i in 0..<key.count {
+            let sum = UInt64(key[i]) + (carry & 0xFFFFFFFF)
+            key[i] = UInt32(sum & 0xFFFFFFFF)
+            carry = (carry >> 32) + (sum >> 32)
+            if carry == 0 { break }
+        }
+    }
+
+    func formatKeyAsHex(_ key: [UInt32]) -> String {
+        // Format as big-endian hex (most significant first)
+        var hex = "0x"
+        for i in stride(from: key.count - 1, through: 0, by: -1) {
+            hex += String(format: "%08x", key[i])
+        }
+        return hex
     }
 }
 
