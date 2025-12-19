@@ -274,10 +274,10 @@ struct VanityGenerator: ParsableCommand {
                         var privateKey = storedPrivateKeys[threadId]
                         // The iteration tells us which point was checked
                         // After init: state is for (k+1)*G
-                        // iter=1: advances to (k+2)*G and checks it
-                        // But we need to verify the exact offset empirically
+                        // iter=n means we advanced n times and checked (k+n+1)*G
+                        // So the private key is k + n + 1
                         let baseKey = formatKeyAsHex(privateKey)
-                        addToKey(&privateKey, UInt64(iteration))
+                        addToKey(&privateKey, UInt64(iteration + 1))
                         let hexKey = formatKeyAsHex(privateKey)
                         print("\nFound #\(i + 1): iter=\(iteration), baseKey=\(baseKey), finalKey=\(hexKey)")
 
