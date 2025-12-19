@@ -494,47 +494,148 @@ kernel void profanity_iterate(
 }
 
 // =============================================================================
-// Batch inverse kernel - simple sequential version (like profanity2)
-// One thread per batch, processes BATCH_SIZE points sequentially
+// Batch inverse kernel - SIMD-cooperative version
+// Uses simd_shuffle to pass products between threads in a SIMD group
+// Each thread handles ONE point, 32 threads cooperate for batch inverse
 // =============================================================================
+
+// Helper to shuffle mp_number between SIMD lanes
+inline mp_number simd_shuffle_mp(thread const mp_number* val, ushort lane) {
+    mp_number result;
+    result.d[0] = simd_shuffle(val->d[0], lane);
+    result.d[1] = simd_shuffle(val->d[1], lane);
+    result.d[2] = simd_shuffle(val->d[2], lane);
+    result.d[3] = simd_shuffle(val->d[3], lane);
+    result.d[4] = simd_shuffle(val->d[4], lane);
+    result.d[5] = simd_shuffle(val->d[5], lane);
+    result.d[6] = simd_shuffle(val->d[6], lane);
+    result.d[7] = simd_shuffle(val->d[7], lane);
+    return result;
+}
+
+inline mp_number simd_shuffle_down_mp(thread const mp_number* val, ushort delta) {
+    mp_number result;
+    result.d[0] = simd_shuffle_down(val->d[0], delta);
+    result.d[1] = simd_shuffle_down(val->d[1], delta);
+    result.d[2] = simd_shuffle_down(val->d[2], delta);
+    result.d[3] = simd_shuffle_down(val->d[3], delta);
+    result.d[4] = simd_shuffle_down(val->d[4], delta);
+    result.d[5] = simd_shuffle_down(val->d[5], delta);
+    result.d[6] = simd_shuffle_down(val->d[6], delta);
+    result.d[7] = simd_shuffle_down(val->d[7], delta);
+    return result;
+}
+
+inline mp_number simd_shuffle_up_mp(thread const mp_number* val, ushort delta) {
+    mp_number result;
+    result.d[0] = simd_shuffle_up(val->d[0], delta);
+    result.d[1] = simd_shuffle_up(val->d[1], delta);
+    result.d[2] = simd_shuffle_up(val->d[2], delta);
+    result.d[3] = simd_shuffle_up(val->d[3], delta);
+    result.d[4] = simd_shuffle_up(val->d[4], delta);
+    result.d[5] = simd_shuffle_up(val->d[5], delta);
+    result.d[6] = simd_shuffle_up(val->d[6], delta);
+    result.d[7] = simd_shuffle_up(val->d[7], delta);
+    return result;
+}
 
 kernel void profanity_inverse_batch(
     device mp_number* deltaX [[buffer(0)]],
     device mp_number* inverses [[buffer(1)]],
     constant uint& batchSize [[buffer(2)]],
-    uint tid [[thread_position_in_grid]]
+    uint tid [[thread_position_in_grid]],
+    ushort simd_lane [[thread_index_in_simdgroup]]
 ) {
-    const uint baseId = tid * batchSize;
+    // Each thread loads its own deltaX value
+    mp_number original = deltaX[tid];
 
-    mp_number products[BATCH_SIZE];
-    mp_number originals[BATCH_SIZE];
+    // =========================================================================
+    // STEP 1: Compute PREFIX products using parallel prefix (Kogge-Stone)
+    // prefix[i] = original[0] * original[1] * ... * original[i]
+    // =========================================================================
+    mp_number prefix = original;
 
-    // Forward pass: compute cumulative products
-    originals[0] = deltaX[baseId];
-    products[0] = originals[0];
+    mp_number prev = simd_shuffle_up_mp(&prefix, 1);
+    if (simd_lane >= 1) mp_mod_mul(&prefix, &prefix, &prev);
 
-    for (uint i = 1; i < batchSize; i++) {
-        originals[i] = deltaX[baseId + i];
-        mp_mod_mul(&products[i], &products[i-1], &originals[i]);
-    }
+    prev = simd_shuffle_up_mp(&prefix, 2);
+    if (simd_lane >= 2) mp_mod_mul(&prefix, &prefix, &prev);
 
-    // Single inverse of the product
-    mp_number inv = products[batchSize - 1];
+    prev = simd_shuffle_up_mp(&prefix, 4);
+    if (simd_lane >= 4) mp_mod_mul(&prefix, &prefix, &prev);
+
+    prev = simd_shuffle_up_mp(&prefix, 8);
+    if (simd_lane >= 8) mp_mod_mul(&prefix, &prefix, &prev);
+
+    prev = simd_shuffle_up_mp(&prefix, 16);
+    if (simd_lane >= 16) mp_mod_mul(&prefix, &prefix, &prev);
+
+    // =========================================================================
+    // STEP 2: Compute SUFFIX products using parallel suffix
+    // suffix[i] = original[i] * original[i+1] * ... * original[31]
+    // =========================================================================
+    mp_number suffix = original;
+
+    mp_number next = simd_shuffle_down_mp(&suffix, 1);
+    if (simd_lane < 31) mp_mod_mul(&suffix, &suffix, &next);
+
+    next = simd_shuffle_down_mp(&suffix, 2);
+    if (simd_lane < 30) mp_mod_mul(&suffix, &suffix, &next);
+
+    next = simd_shuffle_down_mp(&suffix, 4);
+    if (simd_lane < 28) mp_mod_mul(&suffix, &suffix, &next);
+
+    next = simd_shuffle_down_mp(&suffix, 8);
+    if (simd_lane < 24) mp_mod_mul(&suffix, &suffix, &next);
+
+    next = simd_shuffle_down_mp(&suffix, 16);
+    if (simd_lane < 16) mp_mod_mul(&suffix, &suffix, &next);
+
+    // =========================================================================
+    // STEP 3: Single modular inverse of the total product
+    // totalProduct = prefix[31] = suffix[0]
+    // =========================================================================
+    mp_number totalProduct = simd_shuffle_mp(&prefix, 31);
+    mp_number inv = totalProduct;
     mp_mod_inverse(&inv);
 
-    // Multiply by -2Gy (fold into all inverses)
+    // Multiply by -2Gy (fold into all inverses for lambda chaining)
     mp_number neg2gy;
     for (int j = 0; j < MP_WORDS; j++) neg2gy.d[j] = NEG_2GY.d[j];
     mp_mod_mul(&inv, &inv, &neg2gy);
 
-    // Backward pass: extract individual inverses
-    for (uint i = batchSize - 1; i > 0; i--) {
-        mp_number thisInv;
-        mp_mod_mul(&thisInv, &inv, &products[i-1]);
-        mp_mod_mul(&inv, &inv, &originals[i]);
-        inverses[baseId + i] = thisInv;
+    // =========================================================================
+    // STEP 4: Compute individual inverses in parallel
+    // 1/original[i] = (1/totalProduct) * prefix[i-1] * suffix[i+1]
+    //
+    // For lane 0:  1/original[0] = inv * suffix[1]
+    // For lane 31: 1/original[31] = inv * prefix[30]
+    // For lane i:  1/original[i] = inv * prefix[i-1] * suffix[i+1]
+    // =========================================================================
+
+    // Get prefix[i-1] - for lane 0, this is undefined, but we handle it
+    mp_number prefixPrev = simd_shuffle_up_mp(&prefix, 1);
+
+    // Get suffix[i+1] - for lane 31, this is undefined, but we handle it
+    mp_number suffixNext = simd_shuffle_down_mp(&suffix, 1);
+
+    mp_number myInverse;
+
+    if (simd_lane == 0) {
+        // 1/original[0] = inv * suffix[1]
+        myInverse = suffixNext;
+        mp_mod_mul(&myInverse, &inv, &myInverse);
+    } else if (simd_lane == 31) {
+        // 1/original[31] = inv * prefix[30]
+        myInverse = prefixPrev;
+        mp_mod_mul(&myInverse, &inv, &myInverse);
+    } else {
+        // 1/original[i] = inv * prefix[i-1] * suffix[i+1]
+        mp_mod_mul(&myInverse, &inv, &prefixPrev);
+        mp_mod_mul(&myInverse, &myInverse, &suffixNext);
     }
-    inverses[baseId] = inv;
+
+    inverses[tid] = myInverse;
 }
 
 // =============================================================================
