@@ -16,10 +16,10 @@ struct VanityGenerator: ParsableCommand {
     var prefix: String = "badbad"
 
     @Option(name: .shortAndLong, help: "Iterations per batch (more = less overhead)")
-    var iterations: Int = 1000  // More iterations per batch reduces dispatch overhead
+    var iterations: Int = 2000  // More iterations per batch reduces dispatch overhead
 
     @Option(name: .shortAndLong, help: "Number of GPU threads")
-    var threads: Int = 524288  // 512K threads - maximize GPU utilization
+    var threads: Int = 1048576  // 1M threads - maximize GPU utilization
 
     @Option(name: .shortAndLong, help: "Inverse batch size (32 optimal for Metal)")
     var batchSize: Int = 32
