@@ -140,6 +140,13 @@ struct VanityGenerator: ParsableCommand {
         }
         memset(debugBuffer.contents(), 0, 24 * MemoryLayout<UInt32>.size)
 
+        // Debug init buffer: 48 x uint32 for init kernel debug output
+        guard let debugInitBuffer = device.makeBuffer(length: 48 * MemoryLayout<UInt32>.size, options: .storageModeShared) else {
+            print("Error: Could not allocate debug init buffer")
+            throw ExitCode.failure
+        }
+        memset(debugInitBuffer.contents(), 0, 48 * MemoryLayout<UInt32>.size)
+
         var prefixLenVal = prefixLen
         var maxResultsVal = UInt32(maxResults)
         var batchSizeVal = UInt32(batchSize)
@@ -197,6 +204,7 @@ struct VanityGenerator: ParsableCommand {
                 encoder.setBuffer(privateKeysBuffer, offset: 0, index: 0)
                 encoder.setBuffer(deltaXBuffer, offset: 0, index: 1)
                 encoder.setBuffer(prevLambdaBuffer, offset: 0, index: 2)
+                encoder.setBuffer(debugInitBuffer, offset: 0, index: 3)
 
                 let gridSize = MTLSize(width: totalThreads, height: 1, depth: 1)
                 encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
@@ -215,10 +223,54 @@ struct VanityGenerator: ParsableCommand {
                 }
                 print("DEBUG: Thread 0 deltaX after init: \(deltaHex)")
                 print("DEBUG: For key=2: k*G = 2G, then init adds G to get 3G")
-                print("DEBUG: Expected deltaX = 3G.x - G.x")
-                // 3*G.x = 0xf9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9
-                // G.x   = 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
-                // Expected delta = 3G.x - G.x = 0x7f7243828f7b8563f3940df02f163b22b23529ca560f6ce92c0f6fb8a5e81f61
+                print("DEBUG: Expected deltaX = 3G.x - G.x = 0x7f722382987c0763f393ecf02a164722b295cb6a55a170d72c0f6fb8a5e81f61")
+
+                // Print debug init buffer values
+                let initPtr = debugInitBuffer.contents().bindMemory(to: UInt32.self, capacity: 48)
+
+                // px (affine x coord of k*G = 2G)
+                var pxHex = "0x"
+                for j in stride(from: 7, through: 0, by: -1) {
+                    pxHex += String(format: "%08x", initPtr[j])
+                }
+                print("DEBUG: 2G.x (px) = \(pxHex)")
+                print("DEBUG: Expected  = 0xc6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5")
+
+                // py (affine y coord of k*G = 2G)
+                var pyHex = "0x"
+                for j in stride(from: 15, through: 8, by: -1) {
+                    pyHex += String(format: "%08x", initPtr[j])
+                }
+                print("DEBUG: 2G.y (py) = \(pyHex)")
+                print("DEBUG: Expected  = 0x1ae168fea63dc339a3c58419466ceaeef7f632653266d0e1236431a950cfe52a")
+
+                // Jacobian result.x
+                var jxHex = "0x"
+                for j in stride(from: 23, through: 16, by: -1) {
+                    jxHex += String(format: "%08x", initPtr[j])
+                }
+                print("DEBUG: Jacobian X = \(jxHex)")
+
+                // Jacobian result.y
+                var jyHex = "0x"
+                for j in stride(from: 31, through: 24, by: -1) {
+                    jyHex += String(format: "%08x", initPtr[j])
+                }
+                print("DEBUG: Jacobian Y = \(jyHex)")
+
+                // Jacobian result.z
+                var jzHex = "0x"
+                for j in stride(from: 39, through: 32, by: -1) {
+                    jzHex += String(format: "%08x", initPtr[j])
+                }
+                print("DEBUG: Jacobian Z = \(jzHex)")
+
+                // zinv
+                var zinvHex = "0x"
+                for j in stride(from: 47, through: 40, by: -1) {
+                    zinvHex += String(format: "%08x", initPtr[j])
+                }
+                print("DEBUG: zinv = \(zinvHex)")
             }
 
             // Step 3: Run iterations with batch inversion

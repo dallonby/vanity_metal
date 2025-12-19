@@ -768,6 +768,7 @@ kernel void compute_initial_points(
     device const uint32_t* privateKeys [[buffer(0)]],
     device mp_number* deltaX [[buffer(1)]],
     device mp_number* prevLambda [[buffer(2)]],
+    device uint32_t* debugInit [[buffer(3)]],  // Debug output for thread 0
     uint tid [[thread_position_in_grid]]
 ) {
     // Load private key (8 x 32-bit words)
@@ -805,6 +806,17 @@ kernel void compute_initial_points(
     mp_number px, py;
     mp_mod_mul(&px, &result.x, &zinv2);
     mp_mod_mul(&py, &result.y, &zinv3);
+
+    // DEBUG: For thread 0, output px, py (the affine coords of k*G)
+    // Layout: [0-7]=px, [8-15]=py, [16-23]=result.x, [24-31]=result.y, [32-39]=result.z, [40-47]=zinv
+    if (tid == 0) {
+        for (int i = 0; i < 8; i++) debugInit[i] = px.d[i];
+        for (int i = 0; i < 8; i++) debugInit[8 + i] = py.d[i];
+        for (int i = 0; i < 8; i++) debugInit[16 + i] = result.x.d[i];
+        for (int i = 0; i < 8; i++) debugInit[24 + i] = result.y.d[i];
+        for (int i = 0; i < 8; i++) debugInit[32 + i] = result.z.d[i];
+        for (int i = 0; i < 8; i++) debugInit[40 + i] = zinv.d[i];
+    }
 
     // Compute initial lambda: (Gy - py) / (Gx - px)
     mp_number dx, dy;
