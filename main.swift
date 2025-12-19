@@ -14,8 +14,8 @@ struct VanityGenerator: ParsableCommand {
     @Option(name: .shortAndLong, help: "Address prefix to match (without 0x)")
     var prefix: String = "badbad"
 
-    @Option(name: .shortAndLong, help: "Iterations per GPU thread")
-    var iterations: Int = 1000
+    @Option(name: .shortAndLong, help: "Iterations per GPU thread (default: 1 for safety)")
+    var iterations: Int = 1
 
     func run() throws {
         print("Vanity Address Generator (Metal/Apple Silicon)")
@@ -55,12 +55,15 @@ struct VanityGenerator: ParsableCommand {
         }
 
         // Calculate thread configuration
+        // Start conservative - EC math is expensive
         let maxThreadsPerGroup = pipelineState.maxTotalThreadsPerThreadgroup
         let threadGroupSize = MTLSize(width: min(256, maxThreadsPerGroup), height: 1, depth: 1)
-        let numThreadGroups = 1024  // Adjust based on GPU
+        let numThreadGroups = 64  // Conservative for heavy EC workload
         let totalThreads = numThreadGroups * threadGroupSize.width
 
         print("Launching \(totalThreads) GPU threads, \(iterations) iterations each")
+        print("(Note: secp256k1 scalar mult is expensive, expect ~1-10K keys/sec)")
+        print("")
 
         // Prepare buffers
         // Seeds buffer - 4 x uint64 per thread
