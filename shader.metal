@@ -398,6 +398,7 @@ kernel void profanity_iterate(
     // Increment iteration counter
     uint iter = iterCounter[tid];
     iterCounter[tid] = iter + 1;
+
     // Load state
     mp_number dX = deltaX[tid];
     mp_number lambda = prevLambda[tid];

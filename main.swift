@@ -190,42 +190,42 @@ struct VanityGenerator: ParsableCommand {
             }
 
             // Step 3: Run iterations with batch inversion
-            // Key optimization: encode ALL iterations into a SINGLE command buffer
-            // This eliminates CPU-GPU round trips between iterations
-            if let commandBuffer = commandQueue.makeCommandBuffer() {
+            // Use a single compute encoder with multiple dispatches for less overhead
+            if let commandBuffer = commandQueue.makeCommandBuffer(),
+               let encoder = commandBuffer.makeComputeCommandEncoder() {
+
+                let inverseGridSize = MTLSize(width: inverseThreads, height: 1, depth: 1)
+                let iterateGridSize = MTLSize(width: totalThreads, height: 1, depth: 1)
 
                 for _ in 0..<iterations {
                     // Inverse kernel
-                    if let encoder = commandBuffer.makeComputeCommandEncoder() {
-                        encoder.setComputePipelineState(inversePipeline)
-                        encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
-                        encoder.setBuffer(inversesBuffer, offset: 0, index: 1)
-                        encoder.setBytes(&batchSizeVal, length: MemoryLayout<UInt32>.size, index: 2)
+                    encoder.setComputePipelineState(inversePipeline)
+                    encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
+                    encoder.setBuffer(inversesBuffer, offset: 0, index: 1)
+                    encoder.setBytes(&batchSizeVal, length: MemoryLayout<UInt32>.size, index: 2)
+                    encoder.dispatchThreads(inverseGridSize, threadsPerThreadgroup: threadGroupSize)
 
-                        let gridSize = MTLSize(width: inverseThreads, height: 1, depth: 1)
-                        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
-                        encoder.endEncoding()
-                    }
+                    // Memory barrier to ensure inverse results are visible
+                    encoder.memoryBarrier(scope: .buffers)
 
                     // Iterate kernel (uses pre-computed inverses)
-                    if let encoder = commandBuffer.makeComputeCommandEncoder() {
-                        encoder.setComputePipelineState(iteratePipeline)
-                        encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
-                        encoder.setBuffer(prevLambdaBuffer, offset: 0, index: 1)
-                        encoder.setBuffer(inversesBuffer, offset: 0, index: 2)
-                        encoder.setBuffer(resultsBuffer, offset: 0, index: 3)
-                        encoder.setBuffer(foundCountBuffer, offset: 0, index: 4)
-                        encoder.setBuffer(prefixBuffer, offset: 0, index: 5)
-                        encoder.setBytes(&prefixLenVal, length: MemoryLayout<UInt32>.size, index: 6)
-                        encoder.setBytes(&maxResultsVal, length: MemoryLayout<UInt32>.size, index: 7)
-                        encoder.setBuffer(iterCounterBuffer, offset: 0, index: 8)
+                    encoder.setComputePipelineState(iteratePipeline)
+                    encoder.setBuffer(deltaXBuffer, offset: 0, index: 0)
+                    encoder.setBuffer(prevLambdaBuffer, offset: 0, index: 1)
+                    encoder.setBuffer(inversesBuffer, offset: 0, index: 2)
+                    encoder.setBuffer(resultsBuffer, offset: 0, index: 3)
+                    encoder.setBuffer(foundCountBuffer, offset: 0, index: 4)
+                    encoder.setBuffer(prefixBuffer, offset: 0, index: 5)
+                    encoder.setBytes(&prefixLenVal, length: MemoryLayout<UInt32>.size, index: 6)
+                    encoder.setBytes(&maxResultsVal, length: MemoryLayout<UInt32>.size, index: 7)
+                    encoder.setBuffer(iterCounterBuffer, offset: 0, index: 8)
+                    encoder.dispatchThreads(iterateGridSize, threadsPerThreadgroup: threadGroupSize)
 
-                        let gridSize = MTLSize(width: totalThreads, height: 1, depth: 1)
-                        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
-                        encoder.endEncoding()
-                    }
+                    // Memory barrier before next iteration
+                    encoder.memoryBarrier(scope: .buffers)
                 }
 
+                encoder.endEncoding()
                 commandBuffer.commit()
                 commandBuffer.waitUntilCompleted()
             }
