@@ -157,9 +157,27 @@ struct JacobianPoint {
     U256 z;
 };
 
+// Helper to copy constant U256 to thread-local
+inline U256 u256_from_constant(constant const U256& c) {
+    U256 result;
+    result.limbs[0] = c.limbs[0];
+    result.limbs[1] = c.limbs[1];
+    result.limbs[2] = c.limbs[2];
+    result.limbs[3] = c.limbs[3];
+    return result;
+}
+
 // Comparison
 inline bool u256_is_zero(thread const U256& a) {
     return a.limbs[0] == 0 && a.limbs[1] == 0 && a.limbs[2] == 0 && a.limbs[3] == 0;
+}
+
+inline bool u256_gte_val(thread const U256& a, U256 b) {
+    for (int i = 3; i >= 0; i--) {
+        if (a.limbs[i] > b.limbs[i]) return true;
+        if (a.limbs[i] < b.limbs[i]) return false;
+    }
+    return true; // equal
 }
 
 inline bool u256_gte(thread const U256& a, thread const U256& b) {
@@ -171,6 +189,17 @@ inline bool u256_gte(thread const U256& a, thread const U256& b) {
 }
 
 // Addition with carry
+inline U256 u256_add_val(thread const U256& a, U256 b) {
+    U256 result;
+    uint64_t carry = 0;
+    for (int i = 0; i < 4; i++) {
+        uint64_t sum = a.limbs[i] + b.limbs[i] + carry;
+        carry = (sum < a.limbs[i]) || (carry && sum == a.limbs[i]) ? 1 : 0;
+        result.limbs[i] = sum;
+    }
+    return result;
+}
+
 inline U256 u256_add(thread const U256& a, thread const U256& b) {
     U256 result;
     uint64_t carry = 0;
@@ -183,6 +212,17 @@ inline U256 u256_add(thread const U256& a, thread const U256& b) {
 }
 
 // Subtraction with borrow
+inline U256 u256_sub_val(thread const U256& a, U256 b) {
+    U256 result;
+    uint64_t borrow = 0;
+    for (int i = 0; i < 4; i++) {
+        uint64_t diff = a.limbs[i] - b.limbs[i] - borrow;
+        borrow = (a.limbs[i] < b.limbs[i] + borrow) ? 1 : 0;
+        result.limbs[i] = diff;
+    }
+    return result;
+}
+
 inline U256 u256_sub(thread const U256& a, thread const U256& b) {
     U256 result;
     uint64_t borrow = 0;
@@ -197,8 +237,9 @@ inline U256 u256_sub(thread const U256& a, thread const U256& b) {
 // Modular reduction (simple subtraction-based for secp256k1)
 inline U256 mod_p(thread const U256& a) {
     U256 result = a;
-    while (u256_gte(result, SECP256K1_P)) {
-        result = u256_sub(result, SECP256K1_P);
+    U256 p = u256_from_constant(SECP256K1_P);
+    while (u256_gte_val(result, p)) {
+        result = u256_sub_val(result, p);
     }
     return result;
 }
@@ -215,7 +256,8 @@ inline U256 mod_sub(thread const U256& a, thread const U256& b) {
     if (u256_gte(a, b)) {
         result = u256_sub(a, b);
     } else {
-        result = u256_sub(u256_add(a, SECP256K1_P), b);
+        U256 p = u256_from_constant(SECP256K1_P);
+        result = u256_sub(u256_add_val(a, p), b);
     }
     return result;
 }
@@ -297,8 +339,9 @@ inline U256 reduce_512_mod_p(thread const U256& lo, thread const U256& hi) {
     result = u256_add(result, mul977);
 
     // Reduce
-    while (u256_gte(result, SECP256K1_P)) {
-        result = u256_sub(result, SECP256K1_P);
+    U256 p = u256_from_constant(SECP256K1_P);
+    while (u256_gte_val(result, p)) {
+        result = u256_sub_val(result, p);
     }
 
     return result;
@@ -444,8 +487,8 @@ inline JacobianPoint scalar_mult_g(thread const U256& k) {
     result.z = {{0, 0, 0, 0}};
 
     JacobianPoint g;
-    g.x = SECP256K1_GX;
-    g.y = SECP256K1_GY;
+    g.x = u256_from_constant(SECP256K1_GX);
+    g.y = u256_from_constant(SECP256K1_GY);
     g.z = {{1, 0, 0, 0}};
 
     for (int i = 255; i >= 0; i--) {
