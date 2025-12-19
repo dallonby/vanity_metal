@@ -14,7 +14,7 @@ using namespace metal;
 // =============================================================================
 
 #define MP_WORDS 8
-#define BATCH_SIZE 32  // Optimal for Metal - less register pressure
+#define BATCH_SIZE 64  // Larger batch = fewer inverse threads = more compute per inverse
 
 typedef uint mp_word;
 
