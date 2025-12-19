@@ -50,11 +50,11 @@ Note: Actual performance depends on prefix length. Longer prefixes require more 
 
 ## How It Works
 
-1. **GPU Threads**: Launches thousands of parallel GPU threads
-2. **Scalar Multiplication**: Each thread computes `k*G` on secp256k1 curve
-3. **Keccak-256**: Hashes the public key to derive the address
-4. **Prefix Match**: Checks if address starts with target prefix
-5. **Atomic Results**: Found keys are atomically stored in results buffer
+1. **Secure Random Generation**: Uses `SecRandomCopyBytes` (CSPRNG) for private keys
+2. **Precomputation**: GPU computes initial public keys via scalar multiplication
+3. **Incremental Search**: Each iteration just adds G to the current point (O(1) vs O(256))
+4. **Keccak-256**: Hashes the public key to derive the address
+5. **Prefix Match**: Checks if address starts with target prefix
 
 ## Architecture
 
@@ -67,6 +67,26 @@ build.sh       - Build script
 
 ## Security Notes
 
-- Private keys are generated using `UInt64.random()` which uses the system CSPRNG
-- Keys are never written to disk during generation
-- For production use, verify generated addresses on a separate trusted machine
+**CRITICAL**: This tool uses `SecRandomCopyBytes` (Apple's CSPRNG) for all private key generation.
+
+### Why This Matters: The Profanity1 Disaster
+
+The original Profanity vanity generator had a catastrophic vulnerability:
+- Used a **weak 32-bit random seed** for key generation
+- Attackers could brute-force the seed space in minutes
+- Led to the **Wintermute hack (~$160M stolen)** in September 2022
+- Multiple other wallets were drained using the same attack
+
+### Our Approach
+
+- **256-bit entropy**: Each private key uses 256 bits from `SecRandomCopyBytes`
+- **No seed-based PRNG**: We don't use any deterministic random number generators
+- **Fresh randomness per batch**: Each batch gets new entropy from the OS
+- **No GPU-side random**: All randomness comes from the secure CPU-side CSPRNG
+
+### Verification Recommendations
+
+1. **Verify on air-gapped machine**: Derive the address independently using a trusted tool
+2. **Check entropy source**: Run `log show --predicate 'subsystem == "com.apple.securityd"'` to verify CSPRNG usage
+3. **Small test first**: Generate a test address and verify it works before using for real funds
+4. **Immediate transfer**: Move any funds through the vanity address quickly; don't use as long-term storage

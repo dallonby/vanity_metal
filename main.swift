@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import Security
 import ArgumentParser
 
 struct VanityGenerator: ParsableCommand {
@@ -123,10 +124,15 @@ struct VanityGenerator: ParsableCommand {
         while foundResults < count {
             batchCount += 1
 
-            // Step 1: Generate random private keys
-            let keysPtr = privateKeysBuffer.contents().bindMemory(to: UInt64.self, capacity: totalThreads * 4)
-            for i in 0..<(totalThreads * 4) {
-                keysPtr[i] = UInt64.random(in: 0...UInt64.max)
+            // Step 1: Generate cryptographically secure random private keys
+            // CRITICAL: Use SecRandomCopyBytes (CSPRNG) to avoid Profanity1-style vulnerabilities
+            // Profanity1 used weak 32-bit seeds, leading to ~$160M in stolen funds (Wintermute hack)
+            let keysPtr = privateKeysBuffer.contents()
+            let keysByteCount = totalThreads * 4 * MemoryLayout<UInt64>.size
+            let status = SecRandomCopyBytes(kSecRandomDefault, keysByteCount, keysPtr)
+            guard status == errSecSuccess else {
+                print("\nError: Failed to generate secure random bytes (status: \(status))")
+                throw ExitCode.failure
             }
 
             // Step 2: Precompute public keys on GPU (one-time cost per batch)
