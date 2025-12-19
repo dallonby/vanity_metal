@@ -133,6 +133,13 @@ struct VanityGenerator: ParsableCommand {
             throw ExitCode.failure
         }
 
+        // Debug buffer: 24 x uint32 (8 for x, 8 for y, 8 for hash)
+        guard let debugBuffer = device.makeBuffer(length: 24 * MemoryLayout<UInt32>.size, options: .storageModeShared) else {
+            print("Error: Could not allocate debug buffer")
+            throw ExitCode.failure
+        }
+        memset(debugBuffer.contents(), 0, 24 * MemoryLayout<UInt32>.size)
+
         var prefixLenVal = prefixLen
         var maxResultsVal = UInt32(maxResults)
         var batchSizeVal = UInt32(batchSize)
@@ -216,6 +223,7 @@ struct VanityGenerator: ParsableCommand {
                     encoder.setBytes(&prefixLenVal, length: MemoryLayout<UInt32>.size, index: 6)
                     encoder.setBytes(&maxResultsVal, length: MemoryLayout<UInt32>.size, index: 7)
                     encoder.setBuffer(iterCounterBuffer, offset: 0, index: 8)
+                    encoder.setBuffer(debugBuffer, offset: 0, index: 9)
                     encoder.dispatchThreads(iterateGridSize, threadsPerThreadgroup: threadGroupSize)
                 }
 
@@ -230,6 +238,7 @@ struct VanityGenerator: ParsableCommand {
             // Check for new results
             if newFoundCount > foundResults {
                 let resultsPtr = resultsBuffer.contents().bindMemory(to: UInt32.self, capacity: maxResults * 2)
+                let debugPtr = debugBuffer.contents().bindMemory(to: UInt32.self, capacity: 24)
 
                 for i in foundResults..<min(newFoundCount, count) {
                     let threadId = Int(resultsPtr[i * 2])
@@ -245,6 +254,29 @@ struct VanityGenerator: ParsableCommand {
                         addToKey(&privateKey, UInt64(iteration + 1))
                         let hexKey = formatKeyAsHex(privateKey)
                         print("\nFound #\(i + 1): iter=\(iteration), baseKey=\(baseKey), finalKey=\(hexKey)")
+
+                        // Print debug info for first match
+                        if i == 0 {
+                            // Extract x (big-endian hex)
+                            var xHex = "0x"
+                            for j in stride(from: 7, through: 0, by: -1) {
+                                xHex += String(format: "%08x", debugPtr[j])
+                            }
+                            // Extract y (big-endian hex)
+                            var yHex = "0x"
+                            for j in stride(from: 15, through: 8, by: -1) {
+                                yHex += String(format: "%08x", debugPtr[j])
+                            }
+                            // Extract hash (little-endian bytes -> hex)
+                            var hashHex = "0x"
+                            for j in 0..<8 {
+                                hashHex += String(format: "%08x", debugPtr[16 + j].byteSwapped)
+                            }
+                            print("  DEBUG pubkey x: \(xHex)")
+                            print("  DEBUG pubkey y: \(yHex)")
+                            print("  DEBUG hash:     \(hashHex)")
+                            print("  DEBUG address:  0x\(String(hashHex.dropFirst(26)))")
+                        }
                     }
                 }
 

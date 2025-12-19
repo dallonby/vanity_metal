@@ -412,6 +412,7 @@ kernel void profanity_iterate(
     constant uint& prefixLen [[buffer(6)]],         // Prefix length in nibbles
     constant uint& maxResults [[buffer(7)]],        // Max results
     device uint* iterCounter [[buffer(8)]],         // Per-thread iteration counter
+    device uint32_t* debugOutput [[buffer(9)]],     // Debug: pubkey x,y and hash for first match
     uint tid [[thread_position_in_grid]]
 ) {
     // Increment iteration counter and read the NEW value
@@ -505,6 +506,19 @@ kernel void profanity_iterate(
             // Store both thread ID and iteration as result pair
             results[idx * 2] = tid;
             results[idx * 2 + 1] = iter;
+
+            // Debug: store pubkey and hash for first match only
+            if (idx == 0) {
+                // Store x (8 words)
+                for (int i = 0; i < 8; i++) debugOutput[i] = x.d[i];
+                // Store y (8 words)
+                for (int i = 0; i < 8; i++) debugOutput[8 + i] = y.d[i];
+                // Store hash (8 words = 32 bytes)
+                for (int i = 0; i < 4; i++) {
+                    debugOutput[16 + i*2] = uint32_t(state[i] & 0xFFFFFFFF);
+                    debugOutput[16 + i*2 + 1] = uint32_t(state[i] >> 32);
+                }
+            }
         }
     }
 }
